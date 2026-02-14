@@ -46,7 +46,12 @@ class OpenAIResponsesHttpProvider(
 
         val body = json.encodeToString(JsonObject.serializer(), payload)
         val raw = postJson(url = url, headers = headers, body = body)
-        val root = json.parseToJsonElement(raw).jsonObject
+        val root =
+            try {
+                json.parseToJsonElement(raw).jsonObject
+            } catch (t: Throwable) {
+                throw ProviderInvalidResponseException("OpenAIResponsesHttpProvider: invalid JSON response", raw = raw.take(2_000), cause = t)
+            }
 
         val responseId = root["id"]?.jsonPrimitive?.contentOrNull
         val usage = root["usage"] as? JsonObject
@@ -94,7 +99,12 @@ class OpenAIResponsesHttpProvider(
             for ((k, v) in headers) conn.setRequestProperty(k, v)
             conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
 
-            val status = conn.responseCode
+            val status =
+                try {
+                    conn.responseCode
+                } catch (t: java.net.SocketTimeoutException) {
+                    throw ProviderTimeoutException("OpenAIResponsesHttpProvider: timeout", t)
+                }
             val stream =
                 try {
                     if (status >= 400) conn.errorStream else conn.inputStream
@@ -104,7 +114,11 @@ class OpenAIResponsesHttpProvider(
             if (stream == null) throw RuntimeException("no response stream")
             if (status >= 400) {
                 val err = stream.readBytes().toString(Charsets.UTF_8)
-                throw RuntimeException("HTTP $status from $url: $err".trim())
+                if (status == 429) {
+                    val retryAfterMs = parseRetryAfterMs(conn.getHeaderField("retry-after"))
+                    throw ProviderRateLimitException("HTTP 429 from $url: $err".trim(), retryAfterMs = retryAfterMs)
+                }
+                throw ProviderHttpException(status = status, message = "HTTP $status from $url: $err".trim(), body = err)
             }
             InputStreamReader(stream, Charsets.UTF_8).use { reader ->
                 val buf = CharArray(8192)
@@ -152,7 +166,12 @@ class OpenAIResponsesHttpProvider(
             for ((k, v) in headers) conn.setRequestProperty(k, v)
             conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
 
-            val status = conn.responseCode
+            val status =
+                try {
+                    conn.responseCode
+                } catch (t: java.net.SocketTimeoutException) {
+                    throw ProviderTimeoutException("OpenAIResponsesHttpProvider: timeout", t)
+                }
             val stream =
                 try {
                     if (status >= 400) conn.errorStream else conn.inputStream
@@ -161,10 +180,21 @@ class OpenAIResponsesHttpProvider(
                 }
             val raw = stream?.readBytes()?.toString(Charsets.UTF_8).orEmpty()
             if (status >= 400) {
-                throw RuntimeException("HTTP $status from $url: $raw".trim())
+                if (status == 429) {
+                    val retryAfterMs = parseRetryAfterMs(conn.getHeaderField("retry-after"))
+                    throw ProviderRateLimitException("HTTP 429 from $url: $raw".trim(), retryAfterMs = retryAfterMs)
+                }
+                throw ProviderHttpException(status = status, message = "HTTP $status from $url: $raw".trim(), body = raw)
             }
             raw
         }
     }
 
+}
+
+private fun parseRetryAfterMs(header: String?): Long? {
+    val s = header?.trim().orEmpty()
+    if (s.isBlank()) return null
+    val seconds = s.toLongOrNull() ?: return null
+    return seconds.coerceAtLeast(0) * 1000L
 }

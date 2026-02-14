@@ -7,6 +7,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import me.lemonhall.openagentic.sdk.events.UserQuestion
 import me.lemonhall.openagentic.sdk.json.asBooleanOrNull
 import me.lemonhall.openagentic.sdk.json.asIntOrNull
+import me.lemonhall.openagentic.sdk.json.asStringOrNull
 
 fun interface UserAnswerer {
     suspend fun answer(question: UserQuestion): JsonElement
@@ -74,7 +75,15 @@ private class SimplePermissionGate(
                 )
             PermissionMode.DEFAULT -> {
                 val safe = setOf("Read", "Glob", "Grep", "Skill", "SlashCommand", "AskUserQuestion")
-                if (toolName in safe) return ApprovalResult(allowed = true)
+                if (toolName in safe) {
+                    if (!safeSchemaOk(toolName = toolName, toolInput = toolInput)) {
+                        return ApprovalResult(
+                            allowed = false,
+                            denyMessage = "PermissionGate(mode=DEFAULT) schema parse failed for tool '$toolName'",
+                        )
+                    }
+                    return ApprovalResult(allowed = true)
+                }
                 // fallthrough to prompt behavior
             }
             PermissionMode.PROMPT -> Unit
@@ -112,5 +121,21 @@ private class SimplePermissionGate(
             question = question,
             denyMessage = if (allowed) null else "PermissionGate: user denied tool '$toolName'",
         )
+    }
+
+    private fun safeSchemaOk(
+        toolName: String,
+        toolInput: JsonObject,
+    ): Boolean {
+        fun nonEmptyString(keys: List<String>): Boolean {
+            return keys.any { k -> toolInput[k]?.asStringOrNull()?.trim()?.isNotEmpty() == true }
+        }
+
+        return when (toolName) {
+            "Read" -> nonEmptyString(listOf("file_path", "filePath"))
+            "Glob" -> nonEmptyString(listOf("pattern"))
+            "Grep" -> nonEmptyString(listOf("query"))
+            else -> true
+        }
     }
 }

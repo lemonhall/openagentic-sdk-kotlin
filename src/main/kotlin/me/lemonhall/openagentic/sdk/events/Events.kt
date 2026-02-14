@@ -148,6 +148,21 @@ data class Result(
     override val seq: Int? = null,
 ) : Event
 
+@Serializable
+data class RuntimeError(
+    override val type: String = "runtime.error",
+    val phase: String = "",
+    @SerialName("error_type")
+    val errorType: String = "",
+    @SerialName("error_message")
+    val errorMessage: String? = null,
+    val provider: String? = null,
+    @SerialName("tool_use_id")
+    val toolUseId: String? = null,
+    override val ts: Double? = null,
+    override val seq: Int? = null,
+) : Event
+
 data class UnknownEvent(
     override val type: String,
     val raw: JsonObject,

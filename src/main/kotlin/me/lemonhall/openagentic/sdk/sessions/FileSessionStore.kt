@@ -201,6 +201,7 @@ private object EventMeta {
             is me.lemonhall.openagentic.sdk.events.ToolOutputCompacted -> event.copy(seq = seq, ts = ts)
             is me.lemonhall.openagentic.sdk.events.HookEvent -> event.copy(seq = seq, ts = ts)
             is me.lemonhall.openagentic.sdk.events.Result -> event.copy(seq = seq, ts = ts)
+            is me.lemonhall.openagentic.sdk.events.RuntimeError -> event.copy(seq = seq, ts = ts)
             else -> event
         }
     }

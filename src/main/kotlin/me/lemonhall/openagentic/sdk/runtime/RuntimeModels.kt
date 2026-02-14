@@ -5,6 +5,7 @@ import kotlinx.serialization.json.JsonElement
 import me.lemonhall.openagentic.sdk.compaction.CompactionOptions
 import me.lemonhall.openagentic.sdk.hooks.HookEngine
 import me.lemonhall.openagentic.sdk.permissions.PermissionGate
+import me.lemonhall.openagentic.sdk.permissions.PermissionMode
 import me.lemonhall.openagentic.sdk.providers.Provider
 import me.lemonhall.openagentic.sdk.providers.ProviderProtocol
 import me.lemonhall.openagentic.sdk.sessions.FileSessionStore
@@ -17,12 +18,15 @@ data class OpenAgenticOptions(
     val providerProtocolOverride: ProviderProtocol? = null,
     val model: String,
     val apiKey: String? = null,
+    val providerRetry: ProviderRetryOptions = ProviderRetryOptions(),
     val fileSystem: FileSystem = FileSystem.SYSTEM,
     val cwd: Path,
     val projectDir: Path? = null,
     val tools: ToolRegistry = ToolRegistry(),
     val allowedTools: Set<String>? = null,
     val permissionGate: PermissionGate = PermissionGate.bypass(),
+    val sessionPermissionMode: PermissionMode? = null,
+    val permissionModeOverride: PermissionMode? = null,
     val hookEngine: HookEngine = HookEngine(),
     val taskRunner: TaskRunner? = null,
     val sessionStore: FileSessionStore,
@@ -32,6 +36,13 @@ data class OpenAgenticOptions(
     val compaction: CompactionOptions = CompactionOptions(),
     val includePartialMessages: Boolean = false,
     val maxSteps: Int = 20,
+)
+
+data class ProviderRetryOptions(
+    val maxRetries: Int = 0,
+    val initialBackoffMs: Long = 200,
+    val maxBackoffMs: Long = 2_000,
+    val useRetryAfterMs: Boolean = true,
 )
 
 data class TaskContext(

@@ -5,6 +5,7 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -32,12 +33,18 @@ import me.lemonhall.openagentic.sdk.events.ToolUse
 import me.lemonhall.openagentic.sdk.events.UserCompaction
 import me.lemonhall.openagentic.sdk.events.UserQuestion
 import me.lemonhall.openagentic.sdk.events.UserMessage
+import me.lemonhall.openagentic.sdk.events.RuntimeError
 import me.lemonhall.openagentic.sdk.json.asStringOrNull
+import me.lemonhall.openagentic.sdk.permissions.PermissionGate
+import me.lemonhall.openagentic.sdk.permissions.PermissionMode
+import me.lemonhall.openagentic.sdk.permissions.UserAnswerer
 import me.lemonhall.openagentic.sdk.permissions.ToolPermissionContext
 import me.lemonhall.openagentic.sdk.providers.LegacyProvider
 import me.lemonhall.openagentic.sdk.providers.LegacyRequest
 import me.lemonhall.openagentic.sdk.providers.ModelOutput
+import me.lemonhall.openagentic.sdk.providers.ProviderException
 import me.lemonhall.openagentic.sdk.providers.ProviderProtocol
+import me.lemonhall.openagentic.sdk.providers.ProviderRateLimitException
 import me.lemonhall.openagentic.sdk.providers.ResponsesProvider
 import me.lemonhall.openagentic.sdk.providers.ResponsesRequest
 import me.lemonhall.openagentic.sdk.providers.StreamingResponsesProvider
@@ -135,205 +142,279 @@ object OpenAgenticSdk {
             var supportsPreviousResponseId = true
 
             var steps = 0
-            while (steps < options.maxSteps) {
-                steps++
-                val baseInput: List<JsonObject> =
-                    when (protocol) {
-                        ProviderProtocol.RESPONSES -> buildResponsesInput(trimEventsForResume(events, options))
-                        ProviderProtocol.LEGACY -> buildLegacyMessages(trimEventsForResume(events, options))
+            try {
+                while (steps < options.maxSteps) {
+                    steps++
+                    val baseInput: List<JsonObject> =
+                        when (protocol) {
+                            ProviderProtocol.RESPONSES -> buildResponsesInput(trimEventsForResume(events, options))
+                            ProviderProtocol.LEGACY -> buildLegacyMessages(trimEventsForResume(events, options))
+                        }
+
+                    val beforeModel = options.hookEngine.runBeforeModelCall(modelInput = baseInput, context = hookContextBase)
+                    for (he in beforeModel.events) {
+                        val stored = store.appendEvent(sessionId, he) as HookEvent
+                        emit(stored)
+                        events.add(stored)
                     }
+                    if (beforeModel.decision?.block == true) {
+                        val result =
+                            store.appendEvent(
+                                sessionId,
+                                Result(
+                                    finalText = beforeModel.decision.blockReason.orEmpty(),
+                                    sessionId = sessionId,
+                                    stopReason = "hook_blocked",
+                                    steps = steps,
+                                ),
+                            )
+                        emit(result)
+                        return@flow
+                    }
+                    val modelInput = beforeModel.input
 
-                val beforeModel = options.hookEngine.runBeforeModelCall(modelInput = baseInput, context = hookContextBase)
-                for (he in beforeModel.events) {
-                    val stored = store.appendEvent(sessionId, he) as HookEvent
-                    emit(stored)
-                    events.add(stored)
-                }
-                if (beforeModel.decision?.block == true) {
-                    val result =
-                        store.appendEvent(
-                            sessionId,
-                            Result(
-                                finalText = beforeModel.decision.blockReason.orEmpty(),
-                                sessionId = sessionId,
-                                stopReason = "hook_blocked",
-                                steps = steps,
-                            ),
-                        )
-                    emit(result)
-                    return@flow
-                }
-                val modelInput = beforeModel.input
+                    val modelOut0 =
+                        when (protocol) {
+                            ProviderProtocol.RESPONSES -> {
+                                val provider = options.provider as? ResponsesProvider
+                                    ?: throw IllegalArgumentException("providerProtocolOverride=RESPONSES requires a ResponsesProvider")
+                                val req0 =
+                                    ResponsesRequest(
+                                        model = options.model,
+                                        input = modelInput,
+                                        tools = toolSchemas,
+                                        apiKey = options.apiKey,
+                                        previousResponseId = if (supportsPreviousResponseId) previousResponseId else null,
+                                    )
+                                try {
+                                    if (options.includePartialMessages && provider is StreamingResponsesProvider) {
+                                        var completed: ModelOutput? = null
+                                        (provider as StreamingResponsesProvider).stream(req0).collect { sev ->
+                                            when (sev) {
+                                                is ProviderStreamEvent.TextDelta -> {
+                                                    emit(AssistantDelta(textDelta = sev.delta))
+                                                }
 
-                val modelOut0 =
-                    when (protocol) {
-                        ProviderProtocol.RESPONSES -> {
-                            val provider = options.provider as? ResponsesProvider
-                                ?: throw IllegalArgumentException("providerProtocolOverride=RESPONSES requires a ResponsesProvider")
-                            val req0 =
-                                ResponsesRequest(
-                                    model = options.model,
-                                    input = modelInput,
-                                    tools = toolSchemas,
-                                    apiKey = options.apiKey,
-                                    previousResponseId = if (supportsPreviousResponseId) previousResponseId else null,
-                                )
-                            try {
-                                if (options.includePartialMessages && provider is StreamingResponsesProvider) {
-                                    var completed: ModelOutput? = null
-                                    (provider as StreamingResponsesProvider).stream(req0).collect { sev ->
-                                        when (sev) {
-                                            is ProviderStreamEvent.TextDelta -> {
-                                                emit(AssistantDelta(textDelta = sev.delta))
+                                                is ProviderStreamEvent.Completed -> completed = sev.output
+                                                is ProviderStreamEvent.Failed -> throw RuntimeException("provider stream failed: ${sev.message}")
                                             }
-
-                                            is ProviderStreamEvent.Completed -> completed = sev.output
-                                            is ProviderStreamEvent.Failed -> throw RuntimeException("provider stream failed: ${sev.message}")
                                         }
+                                        completed ?: throw RuntimeException("provider stream ended without Completed event")
+                                    } else {
+                                        callWithRateLimitRetry(options) { provider.complete(req0) }
                                     }
-                                    completed ?: throw RuntimeException("provider stream ended without Completed event")
-                                } else {
-                                    provider.complete(req0)
-                                }
-                            } catch (t: Throwable) {
-                                if (t is CancellationException) throw t
-                                val msg = (t.message ?: "").lowercase()
-                                val looksLikePrevId = msg.contains("previous_response_id") || msg.contains("previous response") || msg.contains("previous_response")
-                                if (!looksLikePrevId || previousResponseId.isNullOrBlank()) throw t
-                                supportsPreviousResponseId = false
-                                val req1 = req0.copy(previousResponseId = null)
-                                if (options.includePartialMessages && provider is StreamingResponsesProvider) {
-                                    var completed: ModelOutput? = null
-                                    (provider as StreamingResponsesProvider).stream(req1).collect { sev ->
-                                        when (sev) {
-                                            is ProviderStreamEvent.TextDelta -> emit(AssistantDelta(textDelta = sev.delta))
-                                            is ProviderStreamEvent.Completed -> completed = sev.output
-                                            is ProviderStreamEvent.Failed -> throw RuntimeException("provider stream failed: ${sev.message}")
+                                } catch (t: Throwable) {
+                                    if (t is CancellationException) throw t
+                                    val msg = (t.message ?: "").lowercase()
+                                    val looksLikePrevId = msg.contains("previous_response_id") || msg.contains("previous response") || msg.contains("previous_response")
+                                    if (!looksLikePrevId || previousResponseId.isNullOrBlank()) throw t
+                                    supportsPreviousResponseId = false
+                                    val req1 = req0.copy(previousResponseId = null)
+                                    if (options.includePartialMessages && provider is StreamingResponsesProvider) {
+                                        var completed: ModelOutput? = null
+                                        (provider as StreamingResponsesProvider).stream(req1).collect { sev ->
+                                            when (sev) {
+                                                is ProviderStreamEvent.TextDelta -> emit(AssistantDelta(textDelta = sev.delta))
+                                                is ProviderStreamEvent.Completed -> completed = sev.output
+                                                is ProviderStreamEvent.Failed -> throw RuntimeException("provider stream failed: ${sev.message}")
+                                            }
                                         }
+                                        completed ?: throw RuntimeException("provider stream ended without Completed event")
+                                    } else {
+                                        callWithRateLimitRetry(options) { provider.complete(req1) }
                                     }
-                                    completed ?: throw RuntimeException("provider stream ended without Completed event")
-                                } else {
-                                    provider.complete(req1)
                                 }
                             }
+                            ProviderProtocol.LEGACY -> {
+                                val provider = options.provider as? LegacyProvider
+                                    ?: throw IllegalArgumentException("providerProtocolOverride=LEGACY requires a LegacyProvider")
+                                val req =
+                                    LegacyRequest(
+                                        model = options.model,
+                                        messages = modelInput,
+                                        tools = toolSchemas,
+                                        apiKey = options.apiKey,
+                                    )
+                                callWithRateLimitRetry(options) { provider.complete(req) }
+                            }
                         }
-                        ProviderProtocol.LEGACY -> {
-                            val provider = options.provider as? LegacyProvider
-                                ?: throw IllegalArgumentException("providerProtocolOverride=LEGACY requires a LegacyProvider")
-                            val req =
-                                LegacyRequest(
-                                    model = options.model,
-                                    messages = modelInput,
-                                    tools = toolSchemas,
-                                    apiKey = options.apiKey,
-                                )
-                            provider.complete(req)
-                        }
+
+                    val afterModel = options.hookEngine.runAfterModelCall(modelOutput = modelOut0, context = hookContextBase)
+                    for (he in afterModel.events) {
+                        val stored = store.appendEvent(sessionId, he) as HookEvent
+                        emit(stored)
+                        events.add(stored)
+                    }
+                    if (afterModel.decision?.block == true) {
+                        val result =
+                            store.appendEvent(
+                                sessionId,
+                                Result(
+                                    finalText = afterModel.decision.blockReason.orEmpty(),
+                                    sessionId = sessionId,
+                                    stopReason = "hook_blocked",
+                                    steps = steps,
+                                ),
+                            )
+                        emit(result)
+                        return@flow
+                    }
+                    val modelOut = afterModel.output
+                    lastModelOut = modelOut
+                    if (modelOut.responseId != null) {
+                        previousResponseId = modelOut.responseId
                     }
 
-                val afterModel = options.hookEngine.runAfterModelCall(modelOutput = modelOut0, context = hookContextBase)
-                for (he in afterModel.events) {
-                    val stored = store.appendEvent(sessionId, he) as HookEvent
-                    emit(stored)
-                    events.add(stored)
-                }
-                if (afterModel.decision?.block == true) {
-                    val result =
-                        store.appendEvent(
-                            sessionId,
-                            Result(
-                                finalText = afterModel.decision.blockReason.orEmpty(),
-                                sessionId = sessionId,
-                                stopReason = "hook_blocked",
-                                steps = steps,
-                            ),
-                        )
-                    emit(result)
-                    return@flow
-                }
-                val modelOut = afterModel.output
-                lastModelOut = modelOut
-                if (modelOut.responseId != null) {
-                    previousResponseId = modelOut.responseId
-                }
-
-                if (modelOut.toolCalls.isNotEmpty()) {
-                    for (toolCall in modelOut.toolCalls) {
-                        for (ev in runToolCall(sessionId, toolCall, options, toolCtx)) {
+                    if (modelOut.toolCalls.isNotEmpty()) {
+                        for (toolCall in modelOut.toolCalls) {
+                            for (ev in runToolCall(sessionId, toolCall, options, toolCtx)) {
+                                emit(ev)
+                                events.add(ev)
+                            }
+                        }
+                        for (ev in maybePruneToolOutputs(sessionId, options, events)) {
                             emit(ev)
                             events.add(ev)
                         }
-                    }
-                    for (ev in maybePruneToolOutputs(sessionId, options, events)) {
-                        emit(ev)
-                        events.add(ev)
-                    }
-                    continue
-                }
-
-                val assistantText = modelOut.assistantText
-                if (!assistantText.isNullOrEmpty()) {
-                    val msg = store.appendEvent(sessionId, AssistantMessage(text = assistantText))
-                    emit(msg)
-                    events.add(msg)
-                }
-
-                // Auto-compaction (overflow) is only eligible for legacy or for responses providers
-                // that cannot rely on previous_response_id threading.
-                val compactionEligible = options.compaction.auto && (protocol == ProviderProtocol.LEGACY || !supportsPreviousResponseId)
-                if (compactionEligible && wouldOverflow(options.compaction, modelOut.usage)) {
-                    val marker = store.appendEvent(sessionId, UserCompaction(auto = true, reason = "overflow"))
-                    emit(marker)
-                    events.add(marker)
-
-                    for (ev in runCompactionPass(sessionId = sessionId, options = options, protocol = protocol, supportsPreviousResponseId = supportsPreviousResponseId)) {
-                        emit(ev)
-                        events.add(ev)
+                        continue
                     }
 
-                    // Rebuild input after compaction pivot; previousResponseId can no longer be trusted.
-                    previousResponseId = null
+                    val assistantText = modelOut.assistantText
+                    if (!assistantText.isNullOrEmpty()) {
+                        val msg = store.appendEvent(sessionId, AssistantMessage(text = assistantText))
+                        emit(msg)
+                        events.add(msg)
+                    }
 
-                    val cont = "Continue if you have next steps"
-                    val contEv = store.appendEvent(sessionId, UserMessage(text = cont))
-                    emit(contEv)
-                    events.add(contEv)
+                    // Auto-compaction (overflow) is only eligible for legacy or for responses providers
+                    // that cannot rely on previous_response_id threading.
+                    val compactionEligible = options.compaction.auto && (protocol == ProviderProtocol.LEGACY || !supportsPreviousResponseId)
+                    if (compactionEligible && wouldOverflow(options.compaction, modelOut.usage)) {
+                        val marker = store.appendEvent(sessionId, UserCompaction(auto = true, reason = "overflow"))
+                        emit(marker)
+                        events.add(marker)
 
-                    continue
+                        for (ev in runCompactionPass(sessionId = sessionId, options = options, protocol = protocol, supportsPreviousResponseId = supportsPreviousResponseId)) {
+                            emit(ev)
+                            events.add(ev)
+                        }
+
+                        // Rebuild input after compaction pivot; previousResponseId can no longer be trusted.
+                        previousResponseId = null
+
+                        val cont = "Continue if you have next steps"
+                        val contEv = store.appendEvent(sessionId, UserMessage(text = cont))
+                        emit(contEv)
+                        events.add(contEv)
+
+                        continue
+                    }
+
+                    val result =
+                        store.appendEvent(
+                            sessionId,
+                            Result(
+                                finalText = assistantText.orEmpty(),
+                                sessionId = sessionId,
+                                stopReason = "end",
+                                steps = steps,
+                                usage = modelOut.usage,
+                                responseId = previousResponseId,
+                                providerMetadata = modelOut.providerMetadata,
+                            ),
+                        )
+                    emit(result)
+                    return@flow
                 }
 
                 val result =
                     store.appendEvent(
                         sessionId,
                         Result(
-                            finalText = assistantText.orEmpty(),
+                            finalText = lastModelOut?.assistantText.orEmpty(),
                             sessionId = sessionId,
-                            stopReason = "end",
+                            stopReason = "max_steps",
                             steps = steps,
-                            usage = modelOut.usage,
+                            usage = lastModelOut?.usage,
                             responseId = previousResponseId,
-                            providerMetadata = modelOut.providerMetadata,
+                            providerMetadata = lastModelOut?.providerMetadata,
                         ),
                     )
                 emit(result)
-                return@flow
-            }
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                val phase = if (t is ProviderException) "provider" else "session"
+                val err =
+                    store.appendEvent(
+                        sessionId,
+                        RuntimeError(
+                            phase = phase,
+                            errorType = t::class.simpleName ?: "RuntimeError",
+                            errorMessage = t.message?.take(2_000),
+                            provider = options.provider.name,
+                        ),
+                    )
+                emit(err)
 
-            val result =
-                store.appendEvent(
-                    sessionId,
-                    Result(
-                        finalText = lastModelOut?.assistantText.orEmpty(),
-                        sessionId = sessionId,
-                        stopReason = "max_steps",
-                        steps = steps,
-                        usage = lastModelOut?.usage,
-                        responseId = previousResponseId,
-                        providerMetadata = lastModelOut?.providerMetadata,
-                    ),
-                )
-            emit(result)
+                val result =
+                    store.appendEvent(
+                        sessionId,
+                        Result(
+                            finalText = "",
+                            sessionId = sessionId,
+                            stopReason = "error",
+                            steps = steps,
+                            responseId = previousResponseId,
+                        ),
+                    )
+                emit(result)
+            }
         }
+
+    private suspend fun <T> callWithRateLimitRetry(
+        options: OpenAgenticOptions,
+        block: suspend () -> T,
+    ): T {
+        val retry = options.providerRetry
+        val max = retry.maxRetries.coerceAtLeast(0)
+        var attempt = 0
+        var backoff = retry.initialBackoffMs.coerceAtLeast(0)
+        val maxBackoff = retry.maxBackoffMs.coerceAtLeast(0)
+
+        while (true) {
+            try {
+                return block()
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                val rl = t as? ProviderRateLimitException ?: throw t
+                if (attempt >= max) throw t
+                val waitMs: Long =
+                    (if (retry.useRetryAfterMs) rl.retryAfterMs?.coerceAtLeast(0) else null)
+                        ?: backoff
+                if (waitMs > 0) delay(waitMs)
+                backoff = minOf(backoff * 2, maxBackoff)
+                attempt += 1
+            }
+        }
+    }
+
+    private fun effectivePermissionGate(options: OpenAgenticOptions): PermissionGate {
+        val mode = options.permissionModeOverride ?: options.sessionPermissionMode ?: options.permissionGate.mode
+        if (mode == options.permissionGate.mode) return options.permissionGate
+        return gateForMode(mode = mode, userAnswerer = options.permissionGate.userAnswerer)
+    }
+
+    private fun gateForMode(
+        mode: PermissionMode,
+        userAnswerer: UserAnswerer?,
+    ): PermissionGate {
+        return when (mode) {
+            PermissionMode.BYPASS -> PermissionGate.bypass(userAnswerer = userAnswerer)
+            PermissionMode.DENY -> PermissionGate.deny(userAnswerer = userAnswerer)
+            PermissionMode.PROMPT -> PermissionGate.prompt(userAnswerer = userAnswerer)
+            PermissionMode.DEFAULT -> PermissionGate.default(userAnswerer = userAnswerer)
+        }
+    }
 
     suspend fun run(
         prompt: String,
@@ -707,7 +788,7 @@ object OpenAgenticSdk {
         }
 
         val approval =
-            options.permissionGate.approve(
+            effectivePermissionGate(options).approve(
                 toolName = toolName,
                 toolInput = toolInput,
                 context = ToolPermissionContext(sessionId = sessionId, toolUseId = toolCall.toolUseId),

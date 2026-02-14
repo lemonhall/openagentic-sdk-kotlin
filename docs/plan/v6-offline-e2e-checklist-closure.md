@@ -120,3 +120,147 @@ v6 将把这些名字对齐为“同名薄包装（推荐）”或“重命名�
 .\gradlew.bat test --tests "me.lemonhall.openagentic.sdk.e2e.*"
 ```
 
+## 追溯矩阵（Checklist → Tests）
+
+### 命名对齐 / Names gate
+
+- names gate（静态扫描保证推荐用例名存在，防追溯漂移）：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistNamesTest.kt`
+    - `offline_checklist_recommended_test_names_exist`
+
+### events / trace
+
+- `offline_events_jsonl_roundtrip_unicode`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedEventsLoopTest.kt`
+- `offline_events_no_delta_persistence`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedEventsLoopTest.kt`
+- `offline_events_call_id_bijection`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedEventsLoopTest.kt`
+- `offline_events_strict_required_fields`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedEventsLoopTest.kt`
+- `offline_events_redaction_no_secrets`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedEventsLoopTest.kt`
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineSecretsTest.kt`
+- `offline_events_unknown_fields_forward_compat`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedEventsLoopTest.kt`
+- `offline_events_seq_monotonic`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedEventsLoopTest.kt`
+- `offline_events_dedup_on_retry`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedEventsLoopTest.kt`
+
+### loop / runtime
+
+- `offline_loop_zero_tool_calls`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedEventsLoopTest.kt`
+- `offline_loop_single_tool_call_success`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedEventsLoopTest.kt`
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/runtime/RuntimeToolLoopTest.kt`
+- `offline_loop_multi_tool_calls_serial`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedEventsLoopTest.kt`
+- `offline_loop_tool_raises_exception`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedEventsLoopTest.kt`
+- `offline_loop_tool_returns_non_json`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedEventsLoopTest.kt`
+- `offline_loop_max_tool_calls_fuse`（以 `maxSteps` 作为 fuse 口径）：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedEventsLoopTest.kt`
+- `offline_loop_cancel_mid_run_no_partial_jsonl`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedEventsLoopTest.kt`
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineCancellationAndConcurrencyTest.kt`
+- `offline_loop_timeout_provider_vs_tool_classification`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedEventsLoopTest.kt`
+- `offline_loop_unhandled_exception_becomes_error_event`（落 `runtime.error` + `Result(stop_reason=error)`）：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedCompactionProviderSecurityTest.kt`
+
+### tools / plumbing
+
+- `offline_tool_args_missing_field`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedEventsLoopTest.kt`
+- `offline_tool_args_wrong_type`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedEventsLoopTest.kt`
+- `offline_tool_args_unknown_properties`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedEventsLoopTest.kt`
+- `offline_tool_args_json_string_instead_of_object`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedEventsLoopTest.kt`
+- `offline_tool_output_large_payload_truncate_or_summarize`（compaction+prune 后 placeholder）：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedEventsLoopTest.kt`
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/runtime/ToolOutputPruningPlaceholderTest.kt`
+- `offline_tool_registry_duplicate_name_policy`（later-wins）：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedEventsLoopTest.kt`
+- `offline_allowed_tools_enforced_across_turns`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedCompactionProviderSecurityTest.kt`
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/runtime/ToolNotAllowedTest.kt`
+- `offline_allowed_tools_preserved_after_compaction`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedCompactionProviderSecurityTest.kt`
+
+### permission gate
+
+- `offline_permission_allow_all`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedPermissionsHooksSessionsTest.kt`
+- `offline_permission_deny_records_reason`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineHardInvariantsTest.kt`
+- `offline_permission_prompt_no_answerer_fails_fast`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedPermissionsHooksSessionsTest.kt`
+- `offline_permission_prompt_answerer_happy_path`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedPermissionsHooksSessionsTest.kt`
+- `offline_permission_default_deny_on_schema_parse_error`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedPermissionsHooksSessionsTest.kt`
+- `offline_permission_scope_precedence`（single > session > global）：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedPermissionsHooksSessionsTest.kt`
+
+### hooks
+
+- `offline_hooks_before_model_call_mutates_messages`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedPermissionsHooksSessionsTest.kt`
+- `offline_hooks_pre_tool_use_mutates_args`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedPermissionsHooksSessionsTest.kt`
+- `offline_hooks_order_is_stable`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedPermissionsHooksSessionsTest.kt`
+- `offline_hooks_exception_is_recorded_and_isolated`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedPermissionsHooksSessionsTest.kt`
+- `offline_hooks_cannot_bypass_permissions`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedPermissionsHooksSessionsTest.kt`
+
+### sessions / resume
+
+- `offline_session_resume_continues_without_replaying_side_effect_tool`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedPermissionsHooksSessionsTest.kt`
+- `offline_session_truncated_line_recovery_policy`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedPermissionsHooksSessionsTest.kt`
+- `offline_session_concurrent_sessions_isolation`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedPermissionsHooksSessionsTest.kt`
+- `offline_session_custom_home_dir`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedPermissionsHooksSessionsTest.kt`
+- `offline_session_unicode_paths`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedPermissionsHooksSessionsTest.kt`
+
+### compaction（如有）
+
+- `offline_compaction_trigger_and_records_event`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedCompactionProviderSecurityTest.kt`
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/runtime/CompactionOverflowLegacyTest.kt`
+- `offline_compaction_preserves_permissions_and_allowed_tools`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedCompactionProviderSecurityTest.kt`
+
+### provider
+
+- `offline_provider_timeout_is_classified`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedCompactionProviderSecurityTest.kt`
+- `offline_provider_rate_limit_backoff_uses_fake_clock`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedCompactionProviderSecurityTest.kt`
+- `offline_provider_invalid_json_response_is_handled`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedEventsLoopTest.kt`
+- `offline_provider_stream_parse_half_packet`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/providers/OpenAIResponsesSseDecoderTest.kt`
+
+### security invariants
+
+- `offline_security_path_traversal_blocked`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedCompactionProviderSecurityTest.kt`
+- `offline_security_symlink_escape_blocked`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedCompactionProviderSecurityTest.kt`
+- `offline_security_ssrf_blocked_default`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedCompactionProviderSecurityTest.kt`
+- `offline_security_command_injection_not_possible`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedCompactionProviderSecurityTest.kt`
+- `offline_security_control_chars_do_not_break_jsonl`：
+  - `src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineChecklistAlignedEventsLoopTest.kt`
