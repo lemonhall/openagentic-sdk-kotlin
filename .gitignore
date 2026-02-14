@@ -1,0 +1,15 @@
+# Reference (Python) repo - not part of Kotlin SDK
+/reference/openagentic-sdk-python/*
+
+# Local tool outputs (optional)
+.openagentic-sdk/
+
+# Local secrets / runtime config
+.env
+.env.*
+!.env.example
+
+
+.gradle/*
+build/*
+reference/*
