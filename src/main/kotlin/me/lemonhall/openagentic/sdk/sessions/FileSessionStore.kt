@@ -74,6 +74,7 @@ class FileSessionStore(
         val stored = EventMeta.withMeta(event, seq = nextSeq, ts = ts)
 
         val path = sessionDir.resolve("events.jsonl")
+        repairTruncatedTail(path)
         val line = EventJson.dumps(stored)
         fileSystem.appendingSink(path, mustExist = false).buffer().use { sink ->
             sink.writeUtf8(line)
@@ -95,11 +96,21 @@ class FileSessionStore(
             fileSystem.read(path) {
                 readUtf8()
             }
-        return text
-            .lineSequence()
-            .filter { it.isNotBlank() }
-            .map { EventJson.loads(it) }
-            .toList()
+        val lines = text.lineSequence().toList()
+        val nonBlankIndices = lines.withIndex().filter { it.value.isNotBlank() }.map { it.index }
+        if (nonBlankIndices.isEmpty()) return emptyList()
+        val lastNonBlank = nonBlankIndices.last()
+        val out = mutableListOf<Event>()
+        for (i in nonBlankIndices) {
+            val line = lines[i]
+            try {
+                out.add(EventJson.loads(line))
+            } catch (t: Throwable) {
+                if (i == lastNonBlank) break
+                throw IllegalStateException("events.jsonl parse failed: session_id=$sessionId line_index=$i", t)
+            }
+        }
+        return out
     }
 
     private fun inferNextSeq(sessionId: String): Int {
@@ -118,12 +129,57 @@ class FileSessionStore(
         val lines = text.lineSequence().toList().asReversed()
         for (line in lines.asSequence()) {
             if (line.isBlank()) continue
-            val obj = EventJson.json.decodeFromString(kotlinx.serialization.json.JsonObject.serializer(), line)
-            val seqValue = obj["seq"]?.jsonPrimitive?.intOrNull
+            val seqValue =
+                try {
+                    val obj = EventJson.json.decodeFromString(kotlinx.serialization.json.JsonObject.serializer(), line)
+                    obj["seq"]?.jsonPrimitive?.intOrNull
+                } catch (_: Throwable) {
+                    null
+                }
             if (seqValue != null) return seqValue
-            break
         }
         return 0
+    }
+
+    private fun repairTruncatedTail(path: Path) {
+        if (!fileSystem.exists(path)) return
+        val meta =
+            try {
+                fileSystem.metadata(path)
+            } catch (_: Throwable) {
+                return
+            }
+        val size = meta.size ?: 0L
+        if (size <= 0L) return
+
+        val lastByte =
+            try {
+                fileSystem.openReadOnly(path).use { h ->
+                    h.source(size - 1).buffer().use { src -> src.readByte() }
+                }
+            } catch (_: Throwable) {
+                return
+            }
+        if (lastByte == '\n'.code.toByte()) return
+
+        // File ends without newline: assume last line may be truncated; keep only complete lines.
+        val bytes =
+            try {
+                fileSystem.read(path) { readByteArray() }
+            } catch (_: Throwable) {
+                return
+            }
+        var lastNl = -1
+        for (i in bytes.indices.reversed()) {
+            if (bytes[i] == '\n'.code.toByte()) {
+                lastNl = i
+                break
+            }
+        }
+        val newSize = if (lastNl >= 0) lastNl + 1 else 0
+        fileSystem.write(path) {
+            if (newSize > 0) write(bytes, 0, newSize)
+        }
     }
 }
 

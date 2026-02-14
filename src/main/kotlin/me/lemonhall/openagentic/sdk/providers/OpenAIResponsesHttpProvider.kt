@@ -1,6 +1,7 @@
 package me.lemonhall.openagentic.sdk.providers
 
 import java.net.URI
+import java.io.InputStreamReader
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
@@ -52,7 +53,7 @@ class OpenAIResponsesHttpProvider(
         val outputItems = (root["output"] as? JsonArray)?.mapNotNull { it as? JsonObject } ?: emptyList()
 
         val assistantText = parseAssistantText(outputItems)
-        val toolCalls = parseToolCalls(outputItems)
+        val toolCalls = parseToolCalls(outputItems, json = json)
 
         return ModelOutput(
             assistantText = assistantText,
@@ -82,7 +83,8 @@ class OpenAIResponsesHttpProvider(
                 }
 
             val body = json.encodeToString(JsonObject.serializer(), payload)
-            var lastResponse: JsonObject? = null
+            val sseParser = SseEventParser()
+            val decoder = OpenAIResponsesSseDecoder(json = json)
             val conn = (URI(url).toURL().openConnection() as java.net.HttpURLConnection)
             conn.requestMethod = "POST"
             conn.instanceFollowRedirects = false
@@ -98,65 +100,26 @@ class OpenAIResponsesHttpProvider(
                     if (status >= 400) conn.errorStream else conn.inputStream
                 } catch (_: Throwable) {
                     null
-                }
+            }
             if (stream == null) throw RuntimeException("no response stream")
             if (status >= 400) {
                 val err = stream.readBytes().toString(Charsets.UTF_8)
                 throw RuntimeException("HTTP $status from $url: $err".trim())
             }
-            val reader = stream.bufferedReader(Charsets.UTF_8)
-            reader.use {
+            InputStreamReader(stream, Charsets.UTF_8).use { reader ->
+                val buf = CharArray(8192)
                 while (true) {
-                    val ln = reader.readLine() ?: break
-                    val t = ln.trimEnd()
-                    if (!t.startsWith("data:")) continue
-                    val data = t.removePrefix("data:").trimStart()
-                    if (data.isBlank()) continue
-                    if (data == "[DONE]") break
-                    val obj =
-                        try {
-                            json.parseToJsonElement(data) as? JsonObject
-                        } catch (_: Throwable) {
-                            null
-                        } ?: continue
-                    val type = obj["type"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
-                    if (type == "response.output_text.delta") {
-                        val delta = obj["delta"]?.jsonPrimitive?.contentOrNull
-                        if (!delta.isNullOrEmpty()) emit(ProviderStreamEvent.TextDelta(delta))
-                        continue
-                    }
-                    if (type == "response.completed") {
-                        lastResponse = obj["response"] as? JsonObject
-                        continue
-                    }
-                    if (type == "error") {
-                        emit(ProviderStreamEvent.Failed(message = obj.toString(), raw = obj))
-                        break
+                    val n = reader.read(buf)
+                    if (n < 0) break
+                    for (ev in sseParser.feed(String(buf, 0, n))) {
+                        for (sev in decoder.onSseEvent(ev)) emit(sev)
                     }
                 }
+                for (ev in sseParser.endOfInput()) {
+                    for (sev in decoder.onSseEvent(ev)) emit(sev)
+                }
             }
-
-            val resp = lastResponse
-            if (resp == null) {
-                emit(ProviderStreamEvent.Failed(message = "stream ended without response.completed"))
-                return@flow
-            }
-            val responseId = resp["id"]?.jsonPrimitive?.contentOrNull
-            val usage = resp["usage"] as? JsonObject
-            val outputItems = (resp["output"] as? JsonArray)?.mapNotNull { it as? JsonObject } ?: emptyList()
-            val assistantText = parseAssistantText(outputItems)
-            val toolCalls = parseToolCalls(outputItems)
-            emit(
-                ProviderStreamEvent.Completed(
-                    ModelOutput(
-                        assistantText = assistantText,
-                        toolCalls = toolCalls,
-                        usage = usage,
-                        responseId = responseId,
-                        providerMetadata = null,
-                    ),
-                ),
-            )
+            for (sev in decoder.finish()) emit(sev)
         }.flowOn(Dispatchers.IO)
 
     private fun buildHeaders(
@@ -204,61 +167,4 @@ class OpenAIResponsesHttpProvider(
         }
     }
 
-    // (no separate SSE helper; stream() reads line-by-line and emits as it goes)
-
-    private fun parseAssistantText(outputItems: List<JsonObject>): String? {
-        val parts = mutableListOf<String>()
-        for (item in outputItems) {
-            if (item["type"]?.jsonPrimitive?.content != "message") continue
-            val content = item["content"] as? JsonArray ?: continue
-            for (partEl in content) {
-                val part = partEl as? JsonObject ?: continue
-                if (part["type"]?.jsonPrimitive?.content != "output_text") continue
-                val text = part["text"]?.jsonPrimitive?.contentOrNull
-                if (!text.isNullOrEmpty()) parts.add(text)
-            }
-        }
-        if (parts.isEmpty()) return null
-        return parts.joinToString("")
-    }
-
-    private fun parseToolCalls(outputItems: List<JsonObject>): List<ToolCall> {
-        val out = mutableListOf<ToolCall>()
-        for (item in outputItems) {
-            if (item["type"]?.jsonPrimitive?.content != "function_call") continue
-            val callId = item["call_id"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: continue
-            val name = item["name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: continue
-            val argsEl = item["arguments"]
-            val argsObj =
-                when (argsEl) {
-                    is JsonObject -> argsEl
-                    is JsonPrimitive -> {
-                        val raw = argsEl.content
-                        if (argsEl.isString) parseArgs(raw) else parseArgs(raw)
-                    }
-                    null -> buildJsonObject { }
-                    else -> buildJsonObject { put("_raw", JsonPrimitive(argsEl.toString())) }
-                }
-            out.add(ToolCall(toolUseId = callId, name = name, arguments = argsObj))
-        }
-        return out
-    }
-
-    private fun parseArgs(raw: String): JsonObject {
-        val s = raw.trim()
-        if (s.isEmpty()) return buildJsonObject { }
-        return try {
-            val el = json.parseToJsonElement(s)
-            el as? JsonObject ?: buildJsonObject { put("_raw", JsonPrimitive(raw)) }
-        } catch (_: Throwable) {
-            buildJsonObject { put("_raw", JsonPrimitive(raw)) }
-        }
-    }
 }
-
-private val JsonPrimitive.contentOrNull: String?
-    get() = try {
-        this.content
-    } catch (_: Throwable) {
-        null
-    }

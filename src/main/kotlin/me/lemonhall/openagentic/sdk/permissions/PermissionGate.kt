@@ -67,7 +67,11 @@ private class SimplePermissionGate(
 
         when (mode) {
             PermissionMode.BYPASS -> return ApprovalResult(allowed = true)
-            PermissionMode.DENY -> return ApprovalResult(allowed = false)
+            PermissionMode.DENY ->
+                return ApprovalResult(
+                    allowed = false,
+                    denyMessage = "PermissionGate(mode=DENY) denied tool '$toolName'",
+                )
             PermissionMode.DEFAULT -> {
                 val safe = setOf("Read", "Glob", "Grep", "Skill", "SlashCommand", "AskUserQuestion")
                 if (toolName in safe) return ApprovalResult(allowed = true)
@@ -84,7 +88,13 @@ private class SimplePermissionGate(
                 choices = listOf("yes", "no"),
             )
 
-        val answerer = userAnswerer ?: return ApprovalResult(allowed = false, question = question)
+        val answerer =
+            userAnswerer
+                ?: return ApprovalResult(
+                    allowed = false,
+                    question = null,
+                    denyMessage = "PermissionGate(mode=$mode) requires userAnswerer, but none is configured for tool '$toolName'",
+                )
         val answer = answerer.answer(question)
         val allowed =
             when (answer) {
@@ -97,6 +107,10 @@ private class SimplePermissionGate(
                 }
                 else -> false
             }
-        return ApprovalResult(allowed = allowed, question = question)
+        return ApprovalResult(
+            allowed = allowed,
+            question = question,
+            denyMessage = if (allowed) null else "PermissionGate: user denied tool '$toolName'",
+        )
     }
 }

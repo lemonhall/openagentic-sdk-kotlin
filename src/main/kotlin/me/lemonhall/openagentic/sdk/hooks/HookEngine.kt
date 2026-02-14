@@ -238,6 +238,7 @@ class HookEngine(
     private data class CallbackRun(
         val nanos: Long,
         val decision: HookDecision?,
+        val error: Throwable? = null,
     ) {
         fun event(
             hookPoint: String,
@@ -245,13 +246,21 @@ class HookEngine(
             matched: Boolean,
         ): HookEvent {
             val ms = nanos.toDouble() / 1_000_000.0
-            val action = decision?.action ?: if (decision?.block == true) "block" else null
+            val action =
+                when {
+                    error != null -> "error"
+                    !decision?.action.isNullOrBlank() -> decision?.action
+                    decision?.block == true -> "block"
+                    else -> null
+                }
             return HookEvent(
                 hookPoint = hookPoint,
                 name = name,
                 matched = matched,
                 durationMs = ms,
                 action = action,
+                errorType = error?.let { it::class.simpleName },
+                errorMessage = error?.message?.take(500),
             )
         }
     }
@@ -262,19 +271,25 @@ class HookEngine(
         payloadFn: suspend (HookCallback) -> HookDecision,
     ): CallbackRun {
         var decision: HookDecision? = null
+        var error: Throwable? = null
         val nanos =
             measureNanoTime {
                 for (cb in callbacks) {
-                    decision =
-                        if (matcher.timeoutMs != null) {
-                            withTimeout(matcher.timeoutMs) { payloadFn(cb) }
-                        } else {
-                            payloadFn(cb)
-                        }
+                    try {
+                        decision =
+                            if (matcher.timeoutMs != null) {
+                                withTimeout(matcher.timeoutMs) { payloadFn(cb) }
+                            } else {
+                                payloadFn(cb)
+                            }
+                    } catch (t: Throwable) {
+                        error = t
+                        return@measureNanoTime
+                    }
                     if (decision?.block == true) return@measureNanoTime
                 }
             }
-        return CallbackRun(nanos = nanos, decision = decision)
+        return CallbackRun(nanos = nanos, decision = decision, error = error)
     }
 
     private fun matchName(

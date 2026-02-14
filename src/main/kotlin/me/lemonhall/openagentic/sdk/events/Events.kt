@@ -4,6 +4,9 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.doubleOrNull
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonPrimitive
 
 sealed interface Event {
     val type: String
@@ -118,6 +121,10 @@ data class HookEvent(
     @SerialName("duration_ms")
     val durationMs: Double? = null,
     val action: String? = null,
+    @SerialName("error_type")
+    val errorType: String? = null,
+    @SerialName("error_message")
+    val errorMessage: String? = null,
     override val ts: Double? = null,
     override val seq: Int? = null,
 ) : Event
@@ -140,3 +147,14 @@ data class Result(
     override val ts: Double? = null,
     override val seq: Int? = null,
 ) : Event
+
+data class UnknownEvent(
+    override val type: String,
+    val raw: JsonObject,
+) : Event {
+    override val ts: Double?
+        get() = raw["ts"]?.jsonPrimitive?.doubleOrNull
+
+    override val seq: Int?
+        get() = raw["seq"]?.jsonPrimitive?.intOrNull
+}

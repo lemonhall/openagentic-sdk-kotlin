@@ -8,6 +8,7 @@ import me.lemonhall.openagentic.sdk.events.AssistantDelta
 import me.lemonhall.openagentic.sdk.events.AssistantMessage
 import me.lemonhall.openagentic.sdk.events.Event
 import me.lemonhall.openagentic.sdk.events.HookEvent
+import me.lemonhall.openagentic.sdk.events.UnknownEvent
 import me.lemonhall.openagentic.sdk.events.Result
 import me.lemonhall.openagentic.sdk.events.SystemInit
 import me.lemonhall.openagentic.sdk.events.ToolOutputCompacted
@@ -48,6 +49,7 @@ object EventJson {
             is ToolOutputCompacted -> json.encodeToJsonElement(ToolOutputCompacted.serializer(), event)
             is HookEvent -> json.encodeToJsonElement(HookEvent.serializer(), event)
             is Result -> json.encodeToJsonElement(Result.serializer(), event)
+            is UnknownEvent -> event.raw
             else -> throw IllegalArgumentException("Unknown event class: ${event::class.qualifiedName}")
         }
     }
@@ -66,7 +68,7 @@ object EventJson {
             "tool.output_compacted" -> json.decodeFromJsonElement(ToolOutputCompacted.serializer(), obj)
             "hook.event" -> json.decodeFromJsonElement(HookEvent.serializer(), obj)
             "result" -> json.decodeFromJsonElement(Result.serializer(), obj)
-            else -> throw IllegalArgumentException("unknown event type: $eventType")
+            else -> UnknownEvent(type = eventType, raw = obj)
         }
     }
 }

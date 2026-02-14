@@ -4,6 +4,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -195,6 +196,7 @@ object OpenAgenticSdk {
                                     provider.complete(req0)
                                 }
                             } catch (t: Throwable) {
+                                if (t is CancellationException) throw t
                                 val msg = (t.message ?: "").lowercase()
                                 val looksLikePrevId = msg.contains("previous_response_id") || msg.contains("previous response") || msg.contains("previous_response")
                                 if (!looksLikePrevId || previousResponseId.isNullOrBlank()) throw t
@@ -795,6 +797,7 @@ object OpenAgenticSdk {
                     )
                 }
             } catch (e: Exception) {
+                if (e is CancellationException) throw e
                 store.appendEvent(
                     sessionId,
                     ToolResult(
@@ -864,6 +867,7 @@ object OpenAgenticSdk {
                 )
             listOf(ok)
         } catch (e: Exception) {
+            if (e is CancellationException) throw e
             val err =
                 store.appendEvent(
                     sessionId,

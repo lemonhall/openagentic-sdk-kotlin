@@ -25,10 +25,17 @@
   - 交互式 REPL（多轮 + resume + tools + permissions）
   - `--stream` 可选，体验上可持续输出
 
+### M13：Offline E2E（Hard Invariants / Core）
+- DoD：
+  - PR 级门禁：`.\gradlew.bat test` 全绿且零 flake
+  - 新增 offline hard invariants 用例（至少覆盖 events/jsonl、sessions/resume、hooks、permission、compaction）
+  - 用例断言以 trace/events 为主，不依赖最终自然语言
+  - 证据（当前实现）：`src/test/kotlin/me/lemonhall/openagentic/sdk/e2e/OfflineHardInvariantsTest.kt`（15 用例）
+
 ## 计划索引
 
 - `docs/plan/v4-compaction.md`
 - `docs/plan/v4-tools.md`
 - `docs/plan/v4-provider.md`
 - `docs/plan/v4-cli-chat.md`
-
+- `docs/plan/v4-offline-e2e.md`
