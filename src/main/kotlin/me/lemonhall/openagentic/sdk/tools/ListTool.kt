@@ -29,14 +29,17 @@ class ListTool(
             ?: throw IllegalArgumentException("List: not found: $base")
         require(meta.isDirectory) { "List: not a directory: $base" }
 
-        val files = collectFiles(fs = fs, root = base, limit = limit.coerceAtLeast(1))
+        val lim = limit.coerceAtLeast(1)
+        val filesPlusOne = collectFiles(fs = fs, root = base, limit = lim + 1)
+        val truncated = filesPlusOne.size > lim
+        val files = if (truncated) filesPlusOne.take(lim) else filesPlusOne
         val rendered = renderTree(root = base, files = files)
 
         val obj =
             buildJsonObject {
                 put("path", JsonPrimitive(base.toString()))
                 put("count", JsonPrimitive(files.size))
-                put("truncated", JsonPrimitive(files.size >= limit))
+                put("truncated", JsonPrimitive(truncated))
                 put("output", JsonPrimitive(rendered))
             }
         return ToolOutput.Json(obj)

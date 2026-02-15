@@ -1,6 +1,8 @@
 package me.lemonhall.openagentic.sdk.tools
 
 import java.io.ByteArrayOutputStream
+import java.io.InputStream
+import java.io.OutputStream
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 import kotlin.math.min
@@ -49,16 +51,42 @@ class BashTool(
         val stdoutBytes = ByteArrayOutputStream()
         val stderrBytes = ByteArrayOutputStream()
 
+        val fullOutputFile =
+            if (ctx.projectDir != null) {
+                try {
+                    val dir = ctx.projectDir.resolve(".openagentic-sdk").resolve("tool-output")
+                    ctx.fileSystem.createDirectories(dir)
+                    dir.resolve("bash.${UUID.randomUUID().toString().replace("-", "")}.txt")
+                } catch (_: Throwable) {
+                    null
+                }
+            } else {
+                null
+            }
+        val fullOutputStream: OutputStream? =
+            if (fullOutputFile != null) {
+                try {
+                    java.io.FileOutputStream(fullOutputFile.toString())
+                } catch (_: Throwable) {
+                    null
+                }
+            } else {
+                null
+            }
+        val fileLock = Any()
+        val stdoutTotal = longArrayOf(0L)
+        val stderrTotal = longArrayOf(0L)
+
         val stdoutThread =
             Thread {
                 proc.inputStream.use { ins ->
-                    copyWithCap(ins.readBytes(), stdoutBytes, maxBytes = maxOutputBytes + 1)
+                    stdoutTotal[0] = copyWithCap(ins, stdoutBytes, maxBytes = maxOutputBytes + 1, fullSink = fullOutputStream, lock = fileLock)
                 }
             }
         val stderrThread =
             Thread {
                 proc.errorStream.use { ins ->
-                    copyWithCap(ins.readBytes(), stderrBytes, maxBytes = maxOutputBytes + 1)
+                    stderrTotal[0] = copyWithCap(ins, stderrBytes, maxBytes = maxOutputBytes + 1, fullSink = fullOutputStream, lock = fileLock)
                 }
             }
         stdoutThread.isDaemon = true
@@ -72,13 +100,17 @@ class BashTool(
         }
         stdoutThread.join(1_000)
         stderrThread.join(1_000)
+        try {
+            fullOutputStream?.close()
+        } catch (_: Throwable) {
+        }
 
         val exitCode = if (finished) proc.exitValue() else 137
 
         val stdoutFull = stdoutBytes.toByteArray()
         val stderrFull = stderrBytes.toByteArray()
-        val stdoutTruncated = stdoutFull.size > maxOutputBytes
-        val stderrTruncated = stderrFull.size > maxOutputBytes
+        val stdoutTruncated = stdoutTotal[0] > maxOutputBytes.toLong()
+        val stderrTruncated = stderrTotal[0] > maxOutputBytes.toLong()
 
         val stdout = stdoutFull.copyOfRange(0, min(stdoutFull.size, maxOutputBytes))
         val stderr = stderrFull.copyOfRange(0, min(stderrFull.size, maxOutputBytes))
@@ -93,18 +125,15 @@ class BashTool(
             output = lines.take(maxOutputLines).joinToString("\n")
         }
 
+        val shouldKeepFullOutputFile = stdoutTruncated || stderrTruncated || outputLinesTruncated
         val fullOutputPath =
-            if ((stdoutTruncated || stderrTruncated || outputLinesTruncated) && ctx.projectDir != null) {
-                try {
-                    val dir = ctx.projectDir.resolve(".openagentic-sdk").resolve("tool-output")
-                    ctx.fileSystem.createDirectories(dir)
-                    val p = dir.resolve("bash.${UUID.randomUUID().toString().replace("-", "")}.txt")
-                    ctx.fileSystem.write(p) { write(stdoutFull + stderrFull) }
-                    p.toString()
-                } catch (_: Throwable) {
-                    null
-                }
+            if (shouldKeepFullOutputFile) {
+                fullOutputFile?.toString()
             } else {
+                try {
+                    if (fullOutputFile != null) ctx.fileSystem.delete(fullOutputFile)
+                } catch (_: Throwable) {
+                }
                 null
             }
 
@@ -174,13 +203,34 @@ class BashTool(
     }
 
     private fun copyWithCap(
-        bytes: ByteArray,
+        ins: InputStream,
         sink: ByteArrayOutputStream,
         maxBytes: Int,
-    ) {
-        if (bytes.isEmpty()) return
-        val n = min(bytes.size, maxBytes)
-        sink.write(bytes, 0, n)
+        fullSink: OutputStream?,
+        lock: Any,
+    ): Long {
+        val buf = ByteArray(16 * 1024)
+        var total = 0L
+        while (true) {
+            val n = try { ins.read(buf) } catch (_: Throwable) { -1 }
+            if (n <= 0) break
+            total += n.toLong()
+
+            if (sink.size() < maxBytes) {
+                val want = min(n, maxBytes - sink.size())
+                if (want > 0) sink.write(buf, 0, want)
+            }
+
+            if (fullSink != null) {
+                synchronized(lock) {
+                    try {
+                        fullSink.write(buf, 0, n)
+                    } catch (_: Throwable) {
+                    }
+                }
+            }
+        }
+        return total
     }
 }
 

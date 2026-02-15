@@ -3,6 +3,7 @@ package me.lemonhall.openagentic.sdk.tools
 import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.test.runTest
@@ -68,5 +69,75 @@ class ReadToolTest {
             assertEquals(bytes.size, obj["file_size"]?.jsonPrimitive?.content?.toInt())
             assertTrue(obj["image"]?.jsonPrimitive?.content.orEmpty().isNotBlank())
         }
-}
 
+    @Test
+    fun readOffsetOutOfRangeFailsWithMessage() =
+        runTest {
+            val rootNio = Files.createTempDirectory("openagentic-test-")
+            val root = rootNio.toString().replace('\\', '/').toPath()
+            FileSystem.SYSTEM.write(root.resolve("a.txt")) { writeUtf8("one\ntwo\n") }
+
+            val tool = ReadTool()
+            val ctx = ToolContext(fileSystem = FileSystem.SYSTEM, cwd = root, projectDir = root)
+            val err =
+                assertFailsWith<IllegalArgumentException> {
+                    tool.run(
+                        buildJsonObject {
+                            put("file_path", JsonPrimitive("a.txt"))
+                            put("offset", JsonPrimitive(10))
+                            put("limit", JsonPrimitive(1))
+                        },
+                        ctx,
+                    )
+                }
+            assertTrue(err.message.orEmpty().contains("out of range"))
+            assertTrue(err.message.orEmpty().contains("total_lines=2"))
+        }
+
+    @Test
+    fun readMarksTruncationForLargeFile() =
+        runTest {
+            val rootNio = Files.createTempDirectory("openagentic-test-")
+            val root = rootNio.toString().replace('\\', '/').toPath()
+            val big = "a".repeat(1024 * 1024 + 64)
+            FileSystem.SYSTEM.write(root.resolve("big.txt")) { writeUtf8(big) }
+
+            val tool = ReadTool()
+            val ctx = ToolContext(fileSystem = FileSystem.SYSTEM, cwd = root, projectDir = root)
+            val out =
+                tool.run(
+                    buildJsonObject { put("file_path", JsonPrimitive("big.txt")) },
+                    ctx,
+                ) as ToolOutput.Json
+            val obj = out.value?.jsonObject
+            assertNotNull(obj)
+            val truncated = obj["truncated"]?.jsonPrimitive?.content?.toBoolean() ?: false
+            assertTrue(truncated)
+            val fileSize = obj["file_size"]?.jsonPrimitive?.content?.toLong() ?: 0
+            val bytesReturned = obj["bytes_returned"]?.jsonPrimitive?.content?.toLong() ?: 0
+            assertTrue(fileSize > bytesReturned, "expected file_size > bytes_returned; file_size=$fileSize bytes_returned=$bytesReturned")
+        }
+
+    @Test
+    fun readTruncatesVeryLongSingleLine() =
+        runTest {
+            val rootNio = Files.createTempDirectory("openagentic-test-")
+            val root = rootNio.toString().replace('\\', '/').toPath()
+            val longLine = "x".repeat(10_000 + 200)
+            FileSystem.SYSTEM.write(root.resolve("long.txt")) { writeUtf8(longLine) }
+
+            val tool = ReadTool()
+            val ctx = ToolContext(fileSystem = FileSystem.SYSTEM, cwd = root, projectDir = root)
+            val out =
+                tool.run(
+                    buildJsonObject { put("file_path", JsonPrimitive("long.txt")) },
+                    ctx,
+                ) as ToolOutput.Json
+            val obj = out.value?.jsonObject
+            assertNotNull(obj)
+            val content = obj["content"]?.jsonPrimitive?.content.orEmpty()
+            assertTrue(content.contains("…(truncated)"))
+            val truncated = obj["truncated"]?.jsonPrimitive?.content?.toBoolean() ?: false
+            assertTrue(truncated)
+        }
+}

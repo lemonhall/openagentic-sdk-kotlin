@@ -2,6 +2,9 @@ package me.lemonhall.openagentic.sdk.providers
 
 import java.net.URI
 import java.io.InputStreamReader
+import java.time.ZoneOffset
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
@@ -192,9 +195,37 @@ class OpenAIResponsesHttpProvider(
 
 }
 
-private fun parseRetryAfterMs(header: String?): Long? {
-    val s = header?.trim().orEmpty()
-    if (s.isBlank()) return null
-    val seconds = s.toLongOrNull() ?: return null
-    return seconds.coerceAtLeast(0) * 1000L
+internal fun parseRetryAfterMs(
+    header: String?,
+    nowEpochMs: Long = System.currentTimeMillis(),
+): Long? {
+    val raw = header?.trim().orEmpty()
+    if (raw.isBlank()) return null
+
+    fun capMs(ms: Long): Long {
+        // Avoid overflow / pathological sleeps; align with "32-bit signed" caps.
+        return ms.coerceIn(0, Int.MAX_VALUE.toLong())
+    }
+
+    val msSuffix = Regex("^([0-9]+)\\s*ms$", RegexOption.IGNORE_CASE).find(raw)
+    if (msSuffix != null) {
+        val ms = msSuffix.groupValues[1].toLongOrNull() ?: return null
+        return capMs(ms)
+    }
+
+    val seconds = raw.toLongOrNull()
+    if (seconds != null) {
+        val ms =
+            if (seconds <= Long.MAX_VALUE / 1000L) seconds * 1000L else Long.MAX_VALUE
+        return capMs(ms)
+    }
+
+    return try {
+        val dt = ZonedDateTime.parse(raw, DateTimeFormatter.RFC_1123_DATE_TIME).withZoneSameInstant(ZoneOffset.UTC)
+        val targetMs = dt.toInstant().toEpochMilli()
+        val delta = targetMs - nowEpochMs
+        if (delta <= 0) null else capMs(delta)
+    } catch (_: Throwable) {
+        null
+    }
 }

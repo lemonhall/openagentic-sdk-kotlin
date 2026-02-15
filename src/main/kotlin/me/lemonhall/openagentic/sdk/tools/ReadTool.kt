@@ -12,6 +12,7 @@ class ReadTool : Tool {
     override val description: String = "Read a file from disk."
 
     private val maxBytes: Int = 1024 * 1024
+    private val maxLineChars: Int = 10_000
 
     override suspend fun run(
         input: ToolInput,
@@ -29,8 +30,29 @@ class ReadTool : Tool {
         require(offset == null || offset >= 1) { "Read: 'offset' must be a positive integer (1-based)" }
         require(limit == null || limit >= 0) { "Read: 'limit' must be a non-negative integer" }
 
-        var data = ctx.fileSystem.read(p) { readByteArray() }
-        if (data.size > maxBytes) data = data.copyOf(maxBytes)
+        val fileSize: Long? =
+            try {
+                ctx.fileSystem.metadata(p).size
+            } catch (_: Throwable) {
+                null
+            }
+
+        val cap = maxBytes + 1
+        var data =
+            ctx.fileSystem.read(p) {
+                val out = java.io.ByteArrayOutputStream()
+                val buf = ByteArray(16 * 1024)
+                while (out.size() < cap) {
+                    val want = minOf(buf.size, cap - out.size())
+                    val n = read(buf, 0, want)
+                    if (n <= 0) break
+                    out.write(buf, 0, n)
+                }
+                out.toByteArray()
+            }
+        val bytesTruncated = data.size > maxBytes
+        if (bytesTruncated) data = data.copyOf(maxBytes)
+        val bytesReturned = data.size.toLong()
 
         val suffix = p.name.substringAfterLast('.', missingDelimiterValue = "").lowercase()
         if (suffix in setOf("png", "jpg", "jpeg", "gif", "webp")) {
@@ -48,22 +70,37 @@ class ReadTool : Tool {
                     put("file_path", JsonPrimitive(p.toString()))
                     put("image", JsonPrimitive(imageB64))
                     put("mime_type", JsonPrimitive(mimeType))
-                    put("file_size", JsonPrimitive(data.size))
+                    put("file_size", JsonPrimitive(fileSize ?: bytesReturned))
+                    put("bytes_returned", JsonPrimitive(bytesReturned))
+                    put("truncated", JsonPrimitive(bytesTruncated))
                 }
             return ToolOutput.Json(out)
         }
 
         val text = data.toString(Charsets.UTF_8)
+        val endsWithNewline = text.endsWith("\n")
         var lines = text.split('\n').map { it.trimEnd('\r') }
         if (text.endsWith("\n") && lines.isNotEmpty() && lines.last().isEmpty()) {
             // Align with Python's splitlines(): drop exactly one trailing empty line caused by the final newline.
             lines = lines.dropLast(1)
         }
 
+        val longLineTruncated = BooleanArray(1)
+        fun clampLine(line: String): String {
+            if (line.length <= maxLineChars) return line
+            longLineTruncated[0] = true
+            return line.take(maxLineChars) + "…(truncated)"
+        }
+
+        lines = lines.map(::clampLine)
+
         if (offset != null || limit != null) {
             val start = (offset?.minus(1)) ?: 0
             val end = if (limit != null) minOf(lines.size, start + limit) else lines.size
-            val slice = if (start in 0..lines.size) lines.subList(start, end) else emptyList()
+            require(start in 0 until (lines.size.coerceAtLeast(1))) {
+                "Read: 'offset' out of range: offset=${offset ?: 1} total_lines=${lines.size}"
+            }
+            val slice = lines.subList(start, end)
             val numbered =
                 buildString {
                     for ((i, line) in slice.withIndex()) {
@@ -79,14 +116,27 @@ class ReadTool : Tool {
                     put("content", JsonPrimitive(numbered))
                     put("total_lines", JsonPrimitive(lines.size))
                     put("lines_returned", JsonPrimitive(slice.size))
+                    put("file_size", JsonPrimitive(fileSize ?: bytesReturned))
+                    put("bytes_returned", JsonPrimitive(bytesReturned))
+                    put("truncated", JsonPrimitive(bytesTruncated || longLineTruncated[0]))
                 }
             return ToolOutput.Json(out)
         }
 
+        val content =
+            if (bytesTruncated || longLineTruncated[0]) {
+                val joined = lines.joinToString("\n")
+                if (endsWithNewline) joined + "\n" else joined
+            } else {
+                text
+            }
         val out =
             buildJsonObject {
                 put("file_path", JsonPrimitive(p.toString()))
-                put("content", JsonPrimitive(text))
+                put("content", JsonPrimitive(content))
+                put("file_size", JsonPrimitive(fileSize ?: bytesReturned))
+                put("bytes_returned", JsonPrimitive(bytesReturned))
+                put("truncated", JsonPrimitive(bytesTruncated || longLineTruncated[0]))
             }
         return ToolOutput.Json(out)
     }

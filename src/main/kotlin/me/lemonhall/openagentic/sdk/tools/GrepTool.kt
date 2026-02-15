@@ -51,11 +51,16 @@ class GrepTool : Tool {
 
         val matches = mutableListOf<JsonObject>()
         val filesWithMatches = linkedSetOf<String>()
+        val includeHidden = input["include_hidden"]?.asBooleanOrNull() != false
 
         for (p in ctx.fileSystem.listRecursively(rootNorm)) {
             if (ctx.fileSystem.metadataOrNull(p)?.isRegularFile != true) continue
             val rel = p.relativeTo(rootNorm).toString()
             if (!fileGlobRx.matches(rel)) continue
+            if (!includeHidden) {
+                val segs = p.relativeTo(rootNorm).segments
+                if (segs.any { it.startsWith(".") }) continue
+            }
 
             val text =
                 try {
@@ -137,4 +142,3 @@ class GrepTool : Tool {
         return ToolOutput.Json(out)
     }
 }
-

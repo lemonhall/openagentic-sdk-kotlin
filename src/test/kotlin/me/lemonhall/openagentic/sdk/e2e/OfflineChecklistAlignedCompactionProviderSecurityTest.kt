@@ -301,6 +301,52 @@ class OfflineChecklistAlignedCompactionProviderSecurityTest {
     }
 
     @Test
+    @OptIn(ExperimentalCoroutinesApi::class)
+    fun offline_provider_rate_limit_backoff_is_capped_by_maxBackoff() {
+        runTest {
+            val root = tempRoot()
+            val store = FileSessionStore(fileSystem = FileSystem.SYSTEM, rootDir = root)
+            var calls = 0
+            val provider =
+                object : me.lemonhall.openagentic.sdk.providers.ResponsesProvider {
+                    override val name: String = "rate-limit-cap-fixture"
+
+                    override suspend fun complete(request: me.lemonhall.openagentic.sdk.providers.ResponsesRequest): ModelOutput {
+                        calls++
+                        if (calls == 1) throw ProviderRateLimitException("rate limited", retryAfterMs = 60_000)
+                        return ModelOutput(assistantText = "ok", toolCalls = emptyList(), responseId = "resp_1")
+                    }
+                }
+
+            val before = testScheduler.currentTime
+            val events =
+                OpenAgenticSdk.query(
+                    prompt = "hi",
+                    options =
+                        OpenAgenticOptions(
+                            provider = provider,
+                            model = "m",
+                            apiKey = "x",
+                            providerRetry = ProviderRetryOptions(maxRetries = 1, initialBackoffMs = 10, maxBackoffMs = 1_000, useRetryAfterMs = true),
+                            fileSystem = FileSystem.SYSTEM,
+                            cwd = root,
+                            tools = ToolRegistry(),
+                            sessionStore = store,
+                            includePartialMessages = false,
+                            maxSteps = 1,
+                        ),
+                ).toList()
+
+            val after = testScheduler.currentTime
+            assertEquals(2, calls)
+            val delta = after - before
+            assertTrue(delta in 1_000..2_000, "expected capped fake clock sleep (~maxBackoffMs); delta=$delta before=$before after=$after")
+            val result = events.last { it is Result } as Result
+            assertEquals("end", result.stopReason)
+        }
+    }
+
+    @Test
     fun offline_security_path_traversal_blocked() =
         runTest {
             val root = tempRoot()

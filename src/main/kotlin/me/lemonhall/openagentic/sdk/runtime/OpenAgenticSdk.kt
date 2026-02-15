@@ -391,7 +391,8 @@ object OpenAgenticSdk {
                 val waitMs: Long =
                     (if (retry.useRetryAfterMs) rl.retryAfterMs?.coerceAtLeast(0) else null)
                         ?: backoff
-                if (waitMs > 0) delay(waitMs)
+                val cappedWaitMs = minOf(waitMs, maxBackoff)
+                if (cappedWaitMs > 0) delay(cappedWaitMs)
                 backoff = minOf(backoff * 2, maxBackoff)
                 attempt += 1
             }
