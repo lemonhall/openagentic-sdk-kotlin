@@ -55,6 +55,7 @@ object OpenAiToolSchemas {
             ToolPrompts.render("question", promptVars),
         )
         schemasByName["Read"] = schemasByName["Read"]!!.withDescription(ToolPrompts.render("read", promptVars))
+        schemasByName["List"] = schemasByName["List"]!!.withDescription(ToolPrompts.render("list", promptVars))
         schemasByName["Write"] = schemasByName["Write"]!!.withDescription(ToolPrompts.render("write", promptVars))
         schemasByName["Edit"] = schemasByName["Edit"]!!.withDescription(ToolPrompts.render("edit", promptVars))
         schemasByName["Glob"] = schemasByName["Glob"]!!.withDescription(ToolPrompts.render("glob", promptVars))

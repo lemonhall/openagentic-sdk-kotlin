@@ -1,0 +1,11 @@
+Lists files under a directory within the project root.
+
+Project root:
+- {{project_dir}}
+
+Usage:
+- Provide a directory path via `path` (or `dir` / `directory`).
+- Paths may be absolute or relative; relative paths are resolved against the project root.
+- Any path that is outside the project root will be rejected.
+- Use this to quickly discover available files before calling `Read` / `Edit` / `Write`.
+
