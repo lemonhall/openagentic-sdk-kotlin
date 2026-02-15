@@ -16,3 +16,5 @@ CLI（从项目根目录的 `.env` 读取 `OPENAI_API_KEY` / `OPENAI_BASE_URL` /
 ```powershell
 .\gradlew.bat run --args="chat"
 ```
+
+示例（给人类看的 SDK 用法）：`example/README.md`
