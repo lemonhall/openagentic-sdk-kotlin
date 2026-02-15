@@ -2,14 +2,16 @@ package me.lemonhall.openagentic.sdk.tools
 
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
-import java.io.OutputStream
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.min
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
+import okio.BufferedSink
+import okio.buffer
 import okio.Path
 
 class BashTool(
@@ -63,16 +65,17 @@ class BashTool(
             } else {
                 null
             }
-        val fullOutputStream: OutputStream? =
+        val fullOutputSink: BufferedSink? =
             if (fullOutputFile != null) {
                 try {
-                    java.io.FileOutputStream(fullOutputFile.toString())
+                    ctx.fileSystem.sink(fullOutputFile).buffer()
                 } catch (_: Throwable) {
                     null
                 }
             } else {
                 null
             }
+        val fullOutputOk = AtomicBoolean(fullOutputSink != null)
         val fileLock = Any()
         val stdoutTotal = longArrayOf(0L)
         val stderrTotal = longArrayOf(0L)
@@ -80,13 +83,29 @@ class BashTool(
         val stdoutThread =
             Thread {
                 proc.inputStream.use { ins ->
-                    stdoutTotal[0] = copyWithCap(ins, stdoutBytes, maxBytes = maxOutputBytes + 1, fullSink = fullOutputStream, lock = fileLock)
+                    stdoutTotal[0] =
+                        copyWithCap(
+                            ins,
+                            stdoutBytes,
+                            maxBytes = maxOutputBytes + 1,
+                            fullSink = fullOutputSink,
+                            fullOk = fullOutputOk,
+                            lock = fileLock,
+                        )
                 }
             }
         val stderrThread =
             Thread {
                 proc.errorStream.use { ins ->
-                    stderrTotal[0] = copyWithCap(ins, stderrBytes, maxBytes = maxOutputBytes + 1, fullSink = fullOutputStream, lock = fileLock)
+                    stderrTotal[0] =
+                        copyWithCap(
+                            ins,
+                            stderrBytes,
+                            maxBytes = maxOutputBytes + 1,
+                            fullSink = fullOutputSink,
+                            fullOk = fullOutputOk,
+                            lock = fileLock,
+                        )
                 }
             }
         stdoutThread.isDaemon = true
@@ -101,7 +120,7 @@ class BashTool(
         stdoutThread.join(1_000)
         stderrThread.join(1_000)
         try {
-            fullOutputStream?.close()
+            fullOutputSink?.close()
         } catch (_: Throwable) {
         }
 
@@ -127,8 +146,8 @@ class BashTool(
 
         val shouldKeepFullOutputFile = stdoutTruncated || stderrTruncated || outputLinesTruncated
         val fullOutputPath =
-            if (shouldKeepFullOutputFile) {
-                fullOutputFile?.toString()
+            if (shouldKeepFullOutputFile && fullOutputOk.get() && fullOutputFile != null && ctx.fileSystem.exists(fullOutputFile)) {
+                fullOutputFile.toString()
             } else {
                 try {
                     if (fullOutputFile != null) ctx.fileSystem.delete(fullOutputFile)
@@ -206,7 +225,8 @@ class BashTool(
         ins: InputStream,
         sink: ByteArrayOutputStream,
         maxBytes: Int,
-        fullSink: OutputStream?,
+        fullSink: BufferedSink?,
+        fullOk: AtomicBoolean,
         lock: Any,
     ): Long {
         val buf = ByteArray(16 * 1024)
@@ -221,11 +241,12 @@ class BashTool(
                 if (want > 0) sink.write(buf, 0, want)
             }
 
-            if (fullSink != null) {
+            if (fullSink != null && fullOk.get()) {
                 synchronized(lock) {
                     try {
                         fullSink.write(buf, 0, n)
                     } catch (_: Throwable) {
+                        fullOk.set(false)
                     }
                 }
             }

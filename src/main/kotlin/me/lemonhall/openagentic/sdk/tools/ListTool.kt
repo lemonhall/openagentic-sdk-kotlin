@@ -30,7 +30,8 @@ class ListTool(
         require(meta.isDirectory) { "List: not a directory: $base" }
 
         val lim = limit.coerceAtLeast(1)
-        val filesPlusOne = collectFiles(fs = fs, root = base, limit = lim + 1)
+        val probeLimit = if (lim == Int.MAX_VALUE) Int.MAX_VALUE else lim + 1
+        val filesPlusOne = collectFiles(fs = fs, root = base, limit = probeLimit)
         val truncated = filesPlusOne.size > lim
         val files = if (truncated) filesPlusOne.take(lim) else filesPlusOne
         val rendered = renderTree(root = base, files = files)
