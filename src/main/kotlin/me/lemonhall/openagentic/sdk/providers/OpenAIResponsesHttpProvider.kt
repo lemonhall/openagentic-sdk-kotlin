@@ -6,9 +6,12 @@ import java.time.ZoneOffset
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -94,49 +97,57 @@ class OpenAIResponsesHttpProvider(
             val sseParser = SseEventParser()
             val decoder = OpenAIResponsesSseDecoder(json = json)
             val conn = (URI(url).toURL().openConnection() as java.net.HttpURLConnection)
-            conn.requestMethod = "POST"
-            conn.instanceFollowRedirects = false
-            conn.connectTimeout = timeoutMs
-            conn.readTimeout = timeoutMs
-            conn.doOutput = true
-            for ((k, v) in headers) conn.setRequestProperty(k, v)
-            conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+            try {
+                conn.requestMethod = "POST"
+                conn.instanceFollowRedirects = false
+                conn.connectTimeout = timeoutMs
+                conn.readTimeout = timeoutMs
+                conn.doOutput = true
+                for ((k, v) in headers) conn.setRequestProperty(k, v)
+                conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
 
-            val status =
-                try {
-                    conn.responseCode
-                } catch (t: java.net.SocketTimeoutException) {
-                    throw ProviderTimeoutException("OpenAIResponsesHttpProvider: timeout", t)
+                val status =
+                    try {
+                        runInterruptible { conn.responseCode }
+                    } catch (t: java.net.SocketTimeoutException) {
+                        throw ProviderTimeoutException("OpenAIResponsesHttpProvider: timeout", t)
+                    }
+                val stream =
+                    try {
+                        runInterruptible { if (status >= 400) conn.errorStream else conn.inputStream }
+                    } catch (_: Throwable) {
+                        null
+                    }
+                if (stream == null) throw RuntimeException("no response stream")
+                if (status >= 400) {
+                    val err = stream.readBytes().toString(Charsets.UTF_8)
+                    if (status == 429) {
+                        val retryAfterMs = parseRetryAfterMs(conn.getHeaderField("retry-after"))
+                        throw ProviderRateLimitException("HTTP 429 from $url: $err".trim(), retryAfterMs = retryAfterMs)
+                    }
+                    throw ProviderHttpException(status = status, message = "HTTP $status from $url: $err".trim(), body = err)
                 }
-            val stream =
-                try {
-                    if (status >= 400) conn.errorStream else conn.inputStream
-                } catch (_: Throwable) {
-                    null
-            }
-            if (stream == null) throw RuntimeException("no response stream")
-            if (status >= 400) {
-                val err = stream.readBytes().toString(Charsets.UTF_8)
-                if (status == 429) {
-                    val retryAfterMs = parseRetryAfterMs(conn.getHeaderField("retry-after"))
-                    throw ProviderRateLimitException("HTTP 429 from $url: $err".trim(), retryAfterMs = retryAfterMs)
-                }
-                throw ProviderHttpException(status = status, message = "HTTP $status from $url: $err".trim(), body = err)
-            }
-            InputStreamReader(stream, Charsets.UTF_8).use { reader ->
-                val buf = CharArray(8192)
-                while (true) {
-                    val n = reader.read(buf)
-                    if (n < 0) break
-                    for (ev in sseParser.feed(String(buf, 0, n))) {
+                InputStreamReader(stream, Charsets.UTF_8).use { reader ->
+                    val buf = CharArray(8192)
+                    while (true) {
+                        currentCoroutineContext().ensureActive()
+                        val n = runInterruptible { reader.read(buf) }
+                        if (n < 0) break
+                        for (ev in sseParser.feed(String(buf, 0, n))) {
+                            for (sev in decoder.onSseEvent(ev)) emit(sev)
+                        }
+                    }
+                    for (ev in sseParser.endOfInput()) {
                         for (sev in decoder.onSseEvent(ev)) emit(sev)
                     }
                 }
-                for (ev in sseParser.endOfInput()) {
-                    for (sev in decoder.onSseEvent(ev)) emit(sev)
+                for (sev in decoder.finish()) emit(sev)
+            } finally {
+                try {
+                    conn.disconnect()
+                } catch (_: Throwable) {
                 }
             }
-            for (sev in decoder.finish()) emit(sev)
         }.flowOn(Dispatchers.IO)
 
     private fun buildHeaders(

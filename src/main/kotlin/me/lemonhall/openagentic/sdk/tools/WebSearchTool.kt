@@ -59,7 +59,29 @@ class WebSearchTool(
                 put("query", JsonPrimitive(query))
                 put("max_results", JsonPrimitive(maxResults))
             }
-        val obj = transport(endpoint, mapOf("content-type" to "application/json"), payload)
+
+        val obj: JsonObject =
+            try {
+                transport(endpoint, mapOf("content-type" to "application/json"), payload)
+            } catch (t: Throwable) {
+                val results = duckDuckGoSearch(query = query, maxResults = maxResults, allowedSet = allowedSet, blockedSet = blockedSet)
+                return ToolOutput.Json(
+                    buildJsonObject {
+                        put("query", JsonPrimitive(query))
+                        put("results", JsonArray(results))
+                        put("total_results", JsonPrimitive(results.size))
+                        put(
+                            "meta",
+                            buildJsonObject {
+                                put("primary_source", JsonPrimitive("tavily"))
+                                put("fallback_source", JsonPrimitive("duckduckgo"))
+                                put("tavily_error", JsonPrimitive(t.message ?: t::class.simpleName ?: "tavily error"))
+                            },
+                        )
+                    },
+                )
+            }
+
         val resultsIn = obj["results"]
 
         val results =

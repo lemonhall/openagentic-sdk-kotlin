@@ -1,14 +1,17 @@
-- Search the web using Exa AI - performs real-time web searches and can scrape content from specific URLs
-- Provides up-to-date information for current events and recent data
-- Supports configurable result counts and returns the content from the most relevant websites
-- Use this tool for accessing information beyond knowledge cutoff
-- Searches are performed automatically within a single API call
+- Search the web for up-to-date information.
+- Primary backend: Tavily (`TAVILY_API_KEY`).
+- Fallback backend (when Tavily is missing or fails): DuckDuckGo HTML.
+- Use this tool when you need information beyond your knowledge cutoff, current prices, schedules, breaking news, etc.
 
-Usage notes:
-  - Supports live crawling modes: 'fallback' (backup if cached unavailable) or 'preferred' (prioritize live crawling)
-  - Search types: 'auto' (balanced), 'fast' (quick results), 'deep' (comprehensive search)
-  - Configurable context length for optimal LLM integration
-  - Domain filtering and advanced search options available
+Input:
+  - query (string, required)
+  - max_results (int, optional; default ~5)
+  - allowed_domains (string[], optional)
+  - blocked_domains (string[], optional)
 
-Today's date is {{date}}. You MUST use this year when searching for recent information or current events
-- Example: If today is 2025-07-15 and the user asks for "latest AI news", search for "AI news 2025", NOT "AI news 2024"
+Output:
+  - results: [{ title, url, content?, source }]
+  - total_results: int
+  - meta may include tavily_error when fallback is used.
+
+Today's date is {{date}}. Prefer including the current year in queries for "latest/today" requests.
