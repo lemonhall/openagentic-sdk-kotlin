@@ -5,6 +5,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
+import kotlin.test.assertTrue
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -55,5 +56,50 @@ class WebFetchToolTest {
             assertFailsWith<IllegalArgumentException> {
                 tool.run(buildJsonObject { put("url", JsonPrimitive("http://127.0.0.1/")) }, ctx)
             }
+        }
+
+    @Test
+    fun webFetchSanitizesHtmlAndCapsOutput() =
+        runTest {
+            val rootNio = Files.createTempDirectory("openagentic-test-")
+            val root = rootNio.toString().replace('\\', '/').toPath()
+            val ctx = ToolContext(fileSystem = FileSystem.SYSTEM, cwd = root, projectDir = root)
+
+            val html =
+                """
+                <html>
+                  <head><script>alert(1)</script><style>body{}</style></head>
+                  <body>
+                    <h1>Title</h1>
+                    <p>Hello <strong>world</strong></p>
+                    <a href="/x">link</a>
+                    <div>${"x".repeat(10_000)}</div>
+                  </body>
+                </html>
+                """.trimIndent()
+
+            val transport =
+                WebFetchTransport { url, _ ->
+                    WebFetchResponse(200, mapOf("content-type" to "text/html"), html.encodeToByteArray())
+                }
+
+            val tool = WebFetchTool(transport = transport)
+            val out =
+                tool.run(
+                    buildJsonObject {
+                        put("url", JsonPrimitive("https://example.com/page"))
+                        put("mode", JsonPrimitive("clean_html"))
+                        put("max_chars", JsonPrimitive(2000))
+                    },
+                    ctx,
+                ) as ToolOutput.Json
+
+            val obj = out.value?.jsonObject
+            assertNotNull(obj)
+            val text = obj["text"]!!.jsonPrimitive.content
+            assertTrue(text.length <= 2000)
+            assertTrue(!text.contains("<script", ignoreCase = true))
+            assertTrue(text.contains("<a"))
+            assertTrue(text.contains("https://example.com/x"))
         }
 }

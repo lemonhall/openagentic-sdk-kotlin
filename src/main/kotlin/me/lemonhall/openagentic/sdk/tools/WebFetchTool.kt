@@ -6,7 +6,11 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
+import me.lemonhall.openagentic.sdk.json.asIntOrNull
 import me.lemonhall.openagentic.sdk.json.asStringOrNull
+import org.jsoup.Jsoup
+import org.jsoup.nodes.Document
+import org.jsoup.safety.Safelist
 
 fun interface WebFetchTransport {
     fun get(
@@ -28,7 +32,7 @@ class WebFetchTool(
     private val transport: WebFetchTransport = DefaultWebFetchTransport(),
 ) : Tool {
     override val name: String = "WebFetch"
-    override val description: String = "Fetch a URL over HTTP(S)."
+    override val description: String = "Fetch a URL over HTTP(S) and return a size-bounded, sanitized representation."
 
     override suspend fun run(
         input: ToolInput,
@@ -36,6 +40,10 @@ class WebFetchTool(
     ): ToolOutput {
         val url = input["url"]?.asStringOrNull()?.trim().orEmpty()
         require(url.isNotEmpty()) { "WebFetch: 'url' must be a non-empty string" }
+
+        val mode = input["mode"]?.asStringOrNull()?.trim()?.lowercase().orEmpty().ifBlank { "clean_html" }
+        val requestedMaxChars = input["max_chars"]?.asIntOrNull()
+        val maxChars = (requestedMaxChars ?: 24_000).coerceIn(1_000, 80_000)
 
         val requestedUrl = url
         validateUrl(requestedUrl)
@@ -52,7 +60,17 @@ class WebFetchTool(
 
         val body2 = if (result.body.size > maxBytes) result.body.copyOf(maxBytes) else result.body
         val contentType = result.headers["content-type"]
-        val text = body2.toString(Charsets.UTF_8)
+        val rawText = body2.toString(Charsets.UTF_8)
+        val outText =
+            when (mode) {
+                "raw" -> rawText
+                "text" -> sanitizeToText(rawText, baseUrl = result.finalUrl)
+                "clean_html" -> sanitizeToCleanHtml(rawText, baseUrl = result.finalUrl)
+                else -> sanitizeToCleanHtml(rawText, baseUrl = result.finalUrl)
+            }
+
+        val truncated = outText.length > maxChars
+        val limited = if (truncated) outText.take(maxChars) else outText
 
         val out =
             buildJsonObject {
@@ -62,9 +80,76 @@ class WebFetchTool(
                 put("redirect_chain", JsonArray(result.redirectChain.map { JsonPrimitive(it) }))
                 put("status", JsonPrimitive(result.status))
                 if (contentType != null) put("content_type", JsonPrimitive(contentType))
-                put("text", JsonPrimitive(text))
+                put("mode", JsonPrimitive(mode))
+                put("max_chars", JsonPrimitive(maxChars))
+                put("truncated", JsonPrimitive(truncated))
+                put("text", JsonPrimitive(limited))
             }
         return ToolOutput.Json(out)
+    }
+
+    private fun sanitizeToText(
+        raw: String,
+        baseUrl: String,
+    ): String {
+        val doc = parseHtmlBestEffort(raw, baseUrl)
+        return doc.text().trim()
+    }
+
+    private fun sanitizeToCleanHtml(
+        raw: String,
+        baseUrl: String,
+    ): String {
+        val doc = parseHtmlBestEffort(raw, baseUrl)
+        absolutizeLinks(doc)
+
+        val safelist =
+            Safelist.none()
+                .addTags(
+                    "a",
+                    "p",
+                    "br",
+                    "div",
+                    "span",
+                    "ul",
+                    "ol",
+                    "li",
+                    "table",
+                    "thead",
+                    "tbody",
+                    "tr",
+                    "td",
+                    "th",
+                    "h1",
+                    "h2",
+                    "h3",
+                    "h4",
+                    "h5",
+                    "h6",
+                    "pre",
+                    "code",
+                    "blockquote",
+                    "em",
+                    "strong",
+                ).addAttributes("a", "href", "title")
+
+        val cleaned = Jsoup.clean(doc.html(), baseUrl, safelist)
+        return cleaned.trim()
+    }
+
+    private fun parseHtmlBestEffort(
+        raw: String,
+        baseUrl: String,
+    ): Document {
+        // Use html parser even when content-type is unknown. For non-html, this will still produce a text-only DOM.
+        return Jsoup.parse(raw, baseUrl)
+    }
+
+    private fun absolutizeLinks(doc: Document) {
+        doc.select("a[href]").forEach { el ->
+            val abs = el.absUrl("href").trim()
+            if (abs.isNotEmpty()) el.attr("href", abs)
+        }
     }
 
     private fun validateUrl(url: String) {

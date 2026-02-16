@@ -173,6 +173,37 @@ object OpenAgenticSdk {
                     }
                     val modelInput = beforeModel.input
 
+                    // Preflight compaction: avoid provider-side `context_length_exceeded` by compacting BEFORE the call,
+                    // based on an approximate token estimate of the request input.
+                    if (options.compaction.auto && options.compaction.contextLimit > 0) {
+                        val usable = compactionUsableInputTokens(options)
+                        val approx = estimateModelInputTokens(modelInput)
+                        val recentlyCompacted =
+                            events.asReversed()
+                                .take(50)
+                                .filterIsInstance<UserCompaction>()
+                                .any { it.auto && ((it.reason ?: "").lowercase().contains("preflight")) }
+                        if (!recentlyCompacted && usable > 0 && approx >= usable) {
+                            val marker = store.appendEvent(sessionId, UserCompaction(auto = true, reason = "preflight_context_limit"))
+                            emit(marker)
+                            events.add(marker)
+
+                            for (ev in runCompactionPass(sessionId = sessionId, options = options, protocol = protocol, supportsPreviousResponseId = supportsPreviousResponseId)) {
+                                emit(ev)
+                                events.add(ev)
+                            }
+
+                            previousResponseId = null
+
+                            val cont = "Continue if you have next steps"
+                            val contEv = store.appendEvent(sessionId, UserMessage(text = cont))
+                            emit(contEv)
+                            events.add(contEv)
+
+                            continue
+                        }
+                    }
+
                     val modelOut0 =
                         when (protocol) {
                             ProviderProtocol.RESPONSES -> {
@@ -1088,5 +1119,36 @@ object OpenAgenticSdk {
             }
             else -> emptyList()
         }
+    }
+
+    private fun estimateModelInputTokens(modelInput: List<JsonObject>): Int {
+        if (modelInput.isEmpty()) return 0
+        val json = EventJson.json
+        var chars = 0
+        for (it in modelInput) {
+            chars += try {
+                json.encodeToString(JsonObject.serializer(), it).length
+            } catch (_: Throwable) {
+                0
+            }
+        }
+        if (chars <= 0) return 0
+        return maxOf(1, chars / 4)
+    }
+
+    private fun compactionUsableInputTokens(options: OpenAgenticOptions): Int {
+        val c = options.compaction
+        val contextLimit = c.contextLimit.coerceAtLeast(0)
+        if (contextLimit <= 0) return 0
+
+        val outputCap = c.globalOutputCap.coerceAtLeast(0)
+        val outputLimit = c.outputLimit
+        val maxOutputTokens = if (outputLimit != null && outputLimit > 0) minOf(outputLimit, outputCap) else outputCap
+
+        var reserved = c.reserved
+        if (reserved == null || reserved <= 0) reserved = minOf(20_000, maxOutputTokens)
+
+        val effectiveLimit = if (c.inputLimit != null && c.inputLimit > 0) c.inputLimit else contextLimit
+        return (effectiveLimit - reserved.coerceAtLeast(0)).coerceAtLeast(0)
     }
 }
