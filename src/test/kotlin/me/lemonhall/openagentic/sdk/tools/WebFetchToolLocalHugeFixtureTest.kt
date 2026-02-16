@@ -23,14 +23,11 @@ class WebFetchToolLocalHugeFixtureTest {
             val inFile = Path.of(fixturePath)
             assumeTrue(Files.exists(inFile), "fixture file missing: $inFile")
 
-            val outPath = System.getenv("WEBFETCH_FIXTURE_OUT")?.trim().orEmpty()
-            val outFile =
-                if (outPath.isNotBlank()) {
-                    Path.of(outPath)
-                } else {
-                    // default: alongside fixture
-                    inFile.parent.resolve("webfetch87-clean.html")
-                }
+            val outDirPath = System.getenv("WEBFETCH_FIXTURE_OUT_DIR")?.trim().orEmpty()
+            val outDir =
+                if (outDirPath.isNotBlank()) Path.of(outDirPath) else (inFile.parent ?: Path.of("."))
+            val outHtml = outDir.resolve("webfetch87-clean.html")
+            val outMd = outDir.resolve("webfetch87-clean.md")
 
             val baseUrl = System.getenv("WEBFETCH_FIXTURE_BASE_URL")?.trim().orEmpty().ifBlank { "https://example.com/" }
             val maxChars = (System.getenv("WEBFETCH_FIXTURE_MAX_CHARS")?.trim()?.toIntOrNull() ?: 80_000).coerceIn(1_000, 80_000)
@@ -51,7 +48,7 @@ class WebFetchToolLocalHugeFixtureTest {
                 }
 
             val tool = WebFetchTool(transport = transport)
-            val out =
+            val out1 =
                 tool.run(
                     buildJsonObject {
                         put("url", JsonPrimitive(baseUrl))
@@ -61,14 +58,25 @@ class WebFetchToolLocalHugeFixtureTest {
                     ctx,
                 ) as ToolOutput.Json
 
-            val obj = out.value?.jsonObject
+            val obj = out1.value?.jsonObject
             assertNotNull(obj)
             val cleaned = obj["text"]!!.jsonPrimitive.content
             assertTrue(cleaned.length <= maxChars)
             assertTrue(!cleaned.contains("<script", ignoreCase = true))
 
-            Files.createDirectories(outFile.parent)
-            Files.writeString(outFile, cleaned)
+            val out2 =
+                tool.run(
+                    buildJsonObject {
+                        put("url", JsonPrimitive(baseUrl))
+                        put("mode", JsonPrimitive("markdown"))
+                        put("max_chars", JsonPrimitive(maxChars))
+                    },
+                    ctx,
+                ) as ToolOutput.Json
+            val md = out2.value!!.jsonObject["text"]!!.jsonPrimitive.content
+
+            Files.createDirectories(outDir)
+            Files.writeString(outHtml, cleaned)
+            Files.writeString(outMd, md)
         }
 }
-

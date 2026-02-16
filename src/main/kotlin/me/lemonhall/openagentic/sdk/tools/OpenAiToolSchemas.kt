@@ -334,7 +334,7 @@ object OpenAiToolSchemas {
                         "mode",
                         buildJsonObject {
                             put("type", JsonPrimitive("string"))
-                            put("enum", JsonArray(listOf("clean_html", "text", "raw").map { JsonPrimitive(it) }))
+                            put("enum", JsonArray(listOf("markdown", "clean_html", "text", "raw").map { JsonPrimitive(it) }))
                         },
                     )
                     put("max_chars", buildJsonObject { put("type", JsonPrimitive("integer")); put("minimum", JsonPrimitive(1000)); put("maximum", JsonPrimitive(80000)) })

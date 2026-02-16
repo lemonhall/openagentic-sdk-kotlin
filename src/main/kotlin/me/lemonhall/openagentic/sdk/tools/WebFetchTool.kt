@@ -8,8 +8,10 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import me.lemonhall.openagentic.sdk.json.asIntOrNull
 import me.lemonhall.openagentic.sdk.json.asStringOrNull
+import com.vladsch.flexmark.html2md.converter.FlexmarkHtmlConverter
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
+import org.jsoup.nodes.Element
 import org.jsoup.safety.Safelist
 
 fun interface WebFetchTransport {
@@ -41,7 +43,7 @@ class WebFetchTool(
         val url = input["url"]?.asStringOrNull()?.trim().orEmpty()
         require(url.isNotEmpty()) { "WebFetch: 'url' must be a non-empty string" }
 
-        val mode = input["mode"]?.asStringOrNull()?.trim()?.lowercase().orEmpty().ifBlank { "clean_html" }
+        val mode = input["mode"]?.asStringOrNull()?.trim()?.lowercase().orEmpty().ifBlank { "markdown" }
         val requestedMaxChars = input["max_chars"]?.asIntOrNull()
         val maxChars = (requestedMaxChars ?: 24_000).coerceIn(1_000, 80_000)
 
@@ -66,11 +68,19 @@ class WebFetchTool(
                 "raw" -> rawText
                 "text" -> sanitizeToText(rawText, baseUrl = result.finalUrl)
                 "clean_html" -> sanitizeToCleanHtml(rawText, baseUrl = result.finalUrl)
+                "markdown" -> sanitizeToMarkdown(rawText, baseUrl = result.finalUrl)
                 else -> sanitizeToCleanHtml(rawText, baseUrl = result.finalUrl)
             }
 
         val truncated = outText.length > maxChars
         val limited = if (truncated) outText.take(maxChars) else outText
+
+        val title =
+            try {
+                parseHtmlBestEffort(rawText, result.finalUrl).title().trim()
+            } catch (_: Throwable) {
+                ""
+            }
 
         val out =
             buildJsonObject {
@@ -80,6 +90,7 @@ class WebFetchTool(
                 put("redirect_chain", JsonArray(result.redirectChain.map { JsonPrimitive(it) }))
                 put("status", JsonPrimitive(result.status))
                 if (contentType != null) put("content_type", JsonPrimitive(contentType))
+                put("title", JsonPrimitive(title))
                 put("mode", JsonPrimitive(mode))
                 put("max_chars", JsonPrimitive(maxChars))
                 put("truncated", JsonPrimitive(truncated))
@@ -101,7 +112,10 @@ class WebFetchTool(
         baseUrl: String,
     ): String {
         val doc = parseHtmlBestEffort(raw, baseUrl)
+        stripBoilerplate(doc)
         absolutizeLinks(doc)
+        val content = selectMainContent(doc)
+        pruneNonContentBlocks(content)
 
         val safelist =
             Safelist.none()
@@ -109,8 +123,6 @@ class WebFetchTool(
                     "a",
                     "p",
                     "br",
-                    "div",
-                    "span",
                     "ul",
                     "ol",
                     "li",
@@ -133,8 +145,25 @@ class WebFetchTool(
                     "strong",
                 ).addAttributes("a", "href", "title")
 
-        val cleaned = Jsoup.clean(doc.html(), baseUrl, safelist)
-        return cleaned.trim()
+        val cleanedHtml = Jsoup.clean(content.outerHtml(), baseUrl, safelist)
+        val cleanedDoc = Jsoup.parse(cleanedHtml, baseUrl)
+        pruneEmptyNodes(cleanedDoc.body())
+        return cleanedDoc.body().html().trim()
+    }
+
+    private fun sanitizeToMarkdown(
+        raw: String,
+        baseUrl: String,
+    ): String {
+        val html = sanitizeToCleanHtml(raw, baseUrl)
+        val md =
+            try {
+                FlexmarkHtmlConverter.builder().build().convert(html)
+            } catch (_: Throwable) {
+                // Fallback: plain text (still bounded by max_chars upstream).
+                sanitizeToText(raw, baseUrl)
+            }
+        return normalizeMarkdown(md)
     }
 
     private fun parseHtmlBestEffort(
@@ -143,6 +172,130 @@ class WebFetchTool(
     ): Document {
         // Use html parser even when content-type is unknown. For non-html, this will still produce a text-only DOM.
         return Jsoup.parse(raw, baseUrl)
+    }
+
+    private fun stripBoilerplate(doc: Document) {
+        // Remove common non-content containers early to improve main content selection.
+        doc.select("script,style,noscript,svg,canvas,iframe,video,audio,picture,source").remove()
+        doc.select("header,footer,nav,aside,form,button").remove()
+        doc.select("[role=banner],[role=navigation],[role=contentinfo],[role=complementary]").remove()
+        // Remove elements that are very likely tracking/ads.
+        doc.select("[class*=cookie],[id*=cookie],[class*=consent],[id*=consent]").remove()
+        doc.select("[class*=advert],[id*=advert],[class*=ad-],[id*=ad-],[class*=ads],[id*=ads]").remove()
+    }
+
+    private fun selectMainContent(doc: Document): Element {
+        doc.selectFirst("article")?.let { return it }
+        doc.selectFirst("main")?.let { return it }
+
+        val body = doc.body()
+        // Jsoup always has a body for HTML documents; keep fallback for malformed inputs.
+        if (body == null) return doc
+
+        var best: Element = body
+        var bestScore = -1.0
+
+        val candidates = body.select("div,section,article,main")
+        val limited = if (candidates.size > 120) candidates.subList(0, 120) else candidates
+        for (el in limited) {
+            val text = el.text()
+            val textLen = text.length
+            if (textLen < 400) continue
+
+            // Skip "big text blobs" that don't look like readable content containers.
+            val pCount = el.select("p").size
+            val hCount = el.select("h1,h2,h3").size
+            val liCount = el.select("li").size
+            val tableCount = el.select("table").size
+            val codeCount = el.select("pre,code").size
+            val contentSignals = pCount + hCount + liCount + tableCount + codeCount
+            if (contentSignals == 0) continue
+
+            val linkTextLen =
+                el.select("a")
+                    .joinToString("") { it.text() }
+                    .length
+            val linkDensity = if (textLen <= 0) 1.0 else (linkTextLen.toDouble() / textLen.toDouble()).coerceIn(0.0, 1.0)
+            val tagPenalty = el.select("li,nav,aside,footer,header").size * 40
+
+            val score =
+                (textLen.toDouble() * (1.0 - linkDensity)) +
+                    (pCount * 200.0) +
+                    (hCount * 240.0) +
+                    (tableCount * 300.0) +
+                    (codeCount * 120.0) -
+                    tagPenalty
+            if (score > bestScore) {
+                bestScore = score
+                best = el
+            }
+        }
+        return best
+    }
+
+    private fun pruneEmptyNodes(root: Element?) {
+        if (root == null) return
+
+        // Remove tracking pixels if any survived cleaning due to escaping or malformed HTML.
+        root.select("img").remove()
+
+        // Iteratively remove empty block nodes.
+        val removableTags = setOf("div", "span", "p", "section", "article", "main", "blockquote", "ul", "ol", "li", "table", "thead", "tbody", "tr", "td", "th")
+        var changed = true
+        var passes = 0
+        while (changed && passes < 10) {
+            passes++
+            changed = false
+            val nodes = root.getAllElements().asReversed()
+            for (el in nodes) {
+                if (el == root) continue
+                if (!removableTags.contains(el.tagName())) continue
+                if (el.select("a,pre,code,table,td,th,li,br").isNotEmpty()) continue
+                if (el.text().trim().isNotEmpty()) continue
+                el.remove()
+                changed = true
+            }
+        }
+    }
+
+    private fun pruneNonContentBlocks(root: Element) {
+        // Remove common non-content widgets inside the main container.
+        root.select(
+            "[class*=breadcrumb],[id*=breadcrumb]," +
+                "[class*=share],[id*=share]," +
+                "[class*=social],[id*=social]," +
+                "[class*=comment],[id*=comment]," +
+                "[class*=author],[id*=author]," +
+                "[class*=byline],[id*=byline]," +
+                "[class*=newsletter],[id*=newsletter]," +
+                "[class*=subscribe],[id*=subscribe]," +
+                "[class*=promo],[id*=promo]",
+        ).remove()
+
+        // Drop high-link-density blocks (nav-like). Keep conservative thresholds to avoid deleting real article bodies.
+        val blocks = root.select("nav,ul,ol,div,section,aside")
+        for (el in blocks) {
+            val text = el.text().trim()
+            val textLen = text.length
+            if (textLen <= 0) continue
+            val links = el.select("a")
+            if (links.size < 4) continue
+            val linkTextLen = links.joinToString("") { it.text() }.length
+            val density = (linkTextLen.toDouble() / textLen.toDouble()).coerceIn(0.0, 1.0)
+            if (density >= 0.70 && textLen < 1200) {
+                el.remove()
+            }
+        }
+    }
+
+    private fun normalizeMarkdown(md: String): String {
+        val s = md.replace("\r\n", "\n")
+        // Collapse excessive blank lines.
+        return s
+            .lines()
+            .joinToString("\n") { it.trimEnd() }
+            .replace(Regex("\n{3,}"), "\n\n")
+            .trim()
     }
 
     private fun absolutizeLinks(doc: Document) {

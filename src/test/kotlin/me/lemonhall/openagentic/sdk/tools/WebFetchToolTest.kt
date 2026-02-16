@@ -102,4 +102,54 @@ class WebFetchToolTest {
             assertTrue(text.contains("<a"))
             assertTrue(text.contains("https://example.com/x"))
         }
+
+    @Test
+    fun webFetchMarkdownIsContentFocused() =
+        runTest {
+            val rootNio = Files.createTempDirectory("openagentic-test-")
+            val root = rootNio.toString().replace('\\', '/').toPath()
+            val ctx = ToolContext(fileSystem = FileSystem.SYSTEM, cwd = root, projectDir = root)
+
+            val html =
+                """
+                <html>
+                  <head><title>T</title><script>alert(1)</script></head>
+                  <body>
+                    <header>nav</header>
+                    <main>
+                      <h1>Title</h1>
+                      <div><div></div></div>
+                      <p>Hello <strong>world</strong></p>
+                      <a href="/x">link</a>
+                    </main>
+                    <footer>f</footer>
+                  </body>
+                </html>
+                """.trimIndent()
+
+            val transport =
+                WebFetchTransport { _, _ ->
+                    WebFetchResponse(200, mapOf("content-type" to "text/html"), html.encodeToByteArray())
+                }
+
+            val tool = WebFetchTool(transport = transport)
+            val out =
+                tool.run(
+                    buildJsonObject {
+                        put("url", JsonPrimitive("https://example.com/page"))
+                        put("mode", JsonPrimitive("markdown"))
+                        put("max_chars", JsonPrimitive(4000))
+                    },
+                    ctx,
+                ) as ToolOutput.Json
+
+            val obj = out.value?.jsonObject
+            assertNotNull(obj)
+            val text = obj["text"]!!.jsonPrimitive.content
+            assertTrue(!text.contains("<div", ignoreCase = true))
+            assertTrue(text.contains("Title"))
+            assertTrue(text.contains("Hello"))
+            assertTrue(text.contains("world"))
+            assertTrue(text.contains("https://example.com/x"))
+        }
 }
