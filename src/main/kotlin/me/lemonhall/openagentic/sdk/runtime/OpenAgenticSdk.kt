@@ -209,6 +209,27 @@ object OpenAgenticSdk {
                             ProviderProtocol.RESPONSES -> {
                                 val provider = options.provider as? ResponsesProvider
                                     ?: throw IllegalArgumentException("providerProtocolOverride=RESPONSES requires a ResponsesProvider")
+                                suspend fun callResponses(req: ResponsesRequest): ModelOutput {
+                                    if (provider is StreamingResponsesProvider) {
+                                        return callWithRateLimitRetry(options) {
+                                            var completed: ModelOutput? = null
+                                            provider.stream(req).collect { sev ->
+                                                when (sev) {
+                                                    is ProviderStreamEvent.TextDelta -> {
+                                                        if (options.includePartialMessages) {
+                                                            emit(AssistantDelta(textDelta = sev.delta))
+                                                        }
+                                                    }
+
+                                                    is ProviderStreamEvent.Completed -> completed = sev.output
+                                                    is ProviderStreamEvent.Failed -> throw RuntimeException("provider stream failed: ${sev.message}")
+                                                }
+                                            }
+                                            completed ?: throw RuntimeException("provider stream ended without Completed event")
+                                        }
+                                    }
+                                    return callWithRateLimitRetry(options) { provider.complete(req) }
+                                }
                                 val req0 =
                                     ResponsesRequest(
                                         model = options.model,
@@ -218,22 +239,7 @@ object OpenAgenticSdk {
                                         previousResponseId = if (supportsPreviousResponseId) previousResponseId else null,
                                     )
                                 try {
-                                    if (options.includePartialMessages && provider is StreamingResponsesProvider) {
-                                        var completed: ModelOutput? = null
-                                        (provider as StreamingResponsesProvider).stream(req0).collect { sev ->
-                                            when (sev) {
-                                                is ProviderStreamEvent.TextDelta -> {
-                                                    emit(AssistantDelta(textDelta = sev.delta))
-                                                }
-
-                                                is ProviderStreamEvent.Completed -> completed = sev.output
-                                                is ProviderStreamEvent.Failed -> throw RuntimeException("provider stream failed: ${sev.message}")
-                                            }
-                                        }
-                                        completed ?: throw RuntimeException("provider stream ended without Completed event")
-                                    } else {
-                                        callWithRateLimitRetry(options) { provider.complete(req0) }
-                                    }
+                                    callResponses(req0)
                                 } catch (t: Throwable) {
                                     if (t is CancellationException) throw t
                                     val msg = (t.message ?: "").lowercase()
@@ -241,19 +247,7 @@ object OpenAgenticSdk {
                                     if (!looksLikePrevId || previousResponseId.isNullOrBlank()) throw t
                                     supportsPreviousResponseId = false
                                     val req1 = req0.copy(previousResponseId = null)
-                                    if (options.includePartialMessages && provider is StreamingResponsesProvider) {
-                                        var completed: ModelOutput? = null
-                                        (provider as StreamingResponsesProvider).stream(req1).collect { sev ->
-                                            when (sev) {
-                                                is ProviderStreamEvent.TextDelta -> emit(AssistantDelta(textDelta = sev.delta))
-                                                is ProviderStreamEvent.Completed -> completed = sev.output
-                                                is ProviderStreamEvent.Failed -> throw RuntimeException("provider stream failed: ${sev.message}")
-                                            }
-                                        }
-                                        completed ?: throw RuntimeException("provider stream ended without Completed event")
-                                    } else {
-                                        callWithRateLimitRetry(options) { provider.complete(req1) }
-                                    }
+                                    callResponses(req1)
                                 }
                             }
                             ProviderProtocol.LEGACY -> {
@@ -679,18 +673,20 @@ object OpenAgenticSdk {
             when (protocol) {
                 ProviderProtocol.LEGACY -> {
                     requireNotNull(completeLegacy) { "compaction pass requires LegacyProvider when protocol=LEGACY" }
-                    completeLegacy.complete(
-                        LegacyRequest(
-                            model = options.model,
-                            messages = input,
-                            tools = emptyList(),
-                            apiKey = options.apiKey,
-                        ),
-                    )
+                    callWithRateLimitRetry(options) {
+                        completeLegacy.complete(
+                            LegacyRequest(
+                                model = options.model,
+                                messages = input,
+                                tools = emptyList(),
+                                apiKey = options.apiKey,
+                            ),
+                        )
+                    }
                 }
                 ProviderProtocol.RESPONSES -> {
                     requireNotNull(completeResponses) { "compaction pass requires ResponsesProvider when protocol=RESPONSES" }
-                    completeResponses.complete(
+                    val req =
                         ResponsesRequest(
                             model = options.model,
                             input = input,
@@ -698,8 +694,22 @@ object OpenAgenticSdk {
                             apiKey = options.apiKey,
                             previousResponseId = null,
                             store = false,
-                        ),
-                    )
+                        )
+                    if (completeResponses is StreamingResponsesProvider) {
+                        callWithRateLimitRetry(options) {
+                            var completed: ModelOutput? = null
+                            completeResponses.stream(req).collect { sev ->
+                                when (sev) {
+                                    is ProviderStreamEvent.TextDelta -> Unit
+                                    is ProviderStreamEvent.Completed -> completed = sev.output
+                                    is ProviderStreamEvent.Failed -> throw RuntimeException("provider stream failed: ${sev.message}")
+                                }
+                            }
+                            completed ?: throw RuntimeException("provider stream ended without Completed event")
+                        }
+                    } else {
+                        callWithRateLimitRetry(options) { completeResponses.complete(req) }
+                    }
                 }
             }
 
