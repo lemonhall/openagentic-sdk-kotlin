@@ -30,6 +30,9 @@ class OpenAIResponsesHttpProvider(
     private val baseUrl: String = "https://api.openai.com/v1",
     private val apiKeyHeader: String = "authorization",
     private val timeoutMs: Int = 60_000,
+    // Streaming SSE can legitimately be idle (no deltas) for long periods on some providers/models.
+    // Use a larger read timeout for the event stream to avoid spurious SocketTimeoutException.
+    private val streamReadTimeoutMs: Int = 5 * 60_000,
     private val defaultStore: Boolean = true,
 ) : StreamingResponsesProvider {
     private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
@@ -101,7 +104,7 @@ class OpenAIResponsesHttpProvider(
                 conn.requestMethod = "POST"
                 conn.instanceFollowRedirects = false
                 conn.connectTimeout = timeoutMs
-                conn.readTimeout = timeoutMs
+                conn.readTimeout = streamReadTimeoutMs
                 conn.doOutput = true
                 for ((k, v) in headers) conn.setRequestProperty(k, v)
                 conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
@@ -127,19 +130,23 @@ class OpenAIResponsesHttpProvider(
                     }
                     throw ProviderHttpException(status = status, message = "HTTP $status from $url: $err".trim(), body = err)
                 }
-                InputStreamReader(stream, Charsets.UTF_8).use { reader ->
-                    val buf = CharArray(8192)
-                    while (true) {
-                        currentCoroutineContext().ensureActive()
-                        val n = runInterruptible { reader.read(buf) }
-                        if (n < 0) break
-                        for (ev in sseParser.feed(String(buf, 0, n))) {
+                try {
+                    InputStreamReader(stream, Charsets.UTF_8).use { reader ->
+                        val buf = CharArray(8192)
+                        while (true) {
+                            currentCoroutineContext().ensureActive()
+                            val n = runInterruptible { reader.read(buf) }
+                            if (n < 0) break
+                            for (ev in sseParser.feed(String(buf, 0, n))) {
+                                for (sev in decoder.onSseEvent(ev)) emit(sev)
+                            }
+                        }
+                        for (ev in sseParser.endOfInput()) {
                             for (sev in decoder.onSseEvent(ev)) emit(sev)
                         }
                     }
-                    for (ev in sseParser.endOfInput()) {
-                        for (sev in decoder.onSseEvent(ev)) emit(sev)
-                    }
+                } catch (t: java.net.SocketTimeoutException) {
+                    throw ProviderTimeoutException("OpenAIResponsesHttpProvider: stream timeout", t)
                 }
                 for (sev in decoder.finish()) emit(sev)
             } finally {
