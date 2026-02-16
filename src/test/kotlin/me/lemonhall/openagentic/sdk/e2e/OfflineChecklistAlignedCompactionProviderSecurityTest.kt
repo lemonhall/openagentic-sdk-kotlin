@@ -64,12 +64,14 @@ class OfflineChecklistAlignedCompactionProviderSecurityTest {
                     override val name: String = "legacy-compaction-then-tool"
 
                     private var normalCalls = 0
+                    private var sawCompaction = false
 
                     override suspend fun complete(request: LegacyRequest): ModelOutput {
                         val sys0 = request.messages.firstOrNull()
                         val sysRole = (sys0?.get("role") as? JsonPrimitive)?.content
                         val sysContent = (sys0?.get("content") as? JsonPrimitive)?.content
                         if (sysRole == "system" && sysContent?.trim() == COMPACTION_SYSTEM_PROMPT.trim()) {
+                            sawCompaction = true
                             return ModelOutput(assistantText = "SUMMARY_OK", toolCalls = emptyList(), usage = buildJsonObject { put("total_tokens", JsonPrimitive(1)) })
                         }
 
@@ -88,7 +90,7 @@ class OfflineChecklistAlignedCompactionProviderSecurityTest {
                                     usage = buildJsonObject { put("total_tokens", JsonPrimitive(90)) },
                                 )
                             }
-                            userText.contains("Continue if you have next steps") -> {
+                            sawCompaction -> {
                                 ModelOutput(
                                     assistantText = null,
                                     toolCalls = listOf(ToolCall(toolUseId = "call_write_after_compact", name = "Write", arguments = buildJsonObject { })),
@@ -148,12 +150,14 @@ class OfflineChecklistAlignedCompactionProviderSecurityTest {
                 object : LegacyProvider {
                     override val name: String = "legacy-compaction-then-read"
                     private var normalCalls = 0
+                    private var sawCompaction = false
 
                     override suspend fun complete(request: LegacyRequest): ModelOutput {
                         val sys0 = request.messages.firstOrNull()
                         val sysRole = (sys0?.get("role") as? JsonPrimitive)?.content
                         val sysContent = (sys0?.get("content") as? JsonPrimitive)?.content
                         if (sysRole == "system" && sysContent?.trim() == COMPACTION_SYSTEM_PROMPT.trim()) {
+                            sawCompaction = true
                             return ModelOutput(assistantText = "SUMMARY_OK", toolCalls = emptyList(), usage = buildJsonObject { put("total_tokens", JsonPrimitive(1)) })
                         }
 
@@ -171,7 +175,7 @@ class OfflineChecklistAlignedCompactionProviderSecurityTest {
                                     usage = buildJsonObject { put("total_tokens", JsonPrimitive(90)) },
                                 )
                             }
-                            userText.contains("Continue if you have next steps") -> {
+                            sawCompaction -> {
                                 ModelOutput(
                                     assistantText = null,
                                     toolCalls = listOf(ToolCall(toolUseId = "call_read_after_compact", name = "Read", arguments = buildJsonObject { put("file_path", JsonPrimitive("a.txt")) })),

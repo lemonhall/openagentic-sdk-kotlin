@@ -195,11 +195,6 @@ object OpenAgenticSdk {
 
                             previousResponseId = null
 
-                            val cont = "Continue if you have next steps"
-                            val contEv = store.appendEvent(sessionId, UserMessage(text = cont))
-                            emit(contEv)
-                            events.add(contEv)
-
                             continue
                         }
                     }
@@ -326,12 +321,6 @@ object OpenAgenticSdk {
 
                         // Rebuild input after compaction pivot; previousResponseId can no longer be trusted.
                         previousResponseId = null
-
-                        val cont = "Continue if you have next steps"
-                        val contEv = store.appendEvent(sessionId, UserMessage(text = cont))
-                        emit(contEv)
-                        events.add(contEv)
-
                         continue
                     }
 
