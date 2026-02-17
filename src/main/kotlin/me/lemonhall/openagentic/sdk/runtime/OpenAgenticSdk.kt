@@ -56,6 +56,8 @@ import me.lemonhall.openagentic.sdk.tools.ToolOutput
 
 object OpenAgenticSdk {
     private const val SDK_VERSION: String = "0.0.0"
+    private const val TOOL_OUTPUT_MAX_CHARS_FOR_MODEL: Int = 8_000
+    private const val TOOL_OUTPUT_MAX_CHARS_PER_STRING: Int = 4_000
 
     fun query(
         prompt: String,
@@ -491,11 +493,12 @@ object OpenAgenticSdk {
                         } else {
                             e.output ?: JsonNull
                         }
+                    val outputStr = encodeToolOutputForModel(json = json, output = output)
                     items.add(
                         buildJsonObject {
                             put("type", JsonPrimitive("function_call_output"))
                             put("call_id", JsonPrimitive(e.toolUseId))
-                            put("output", JsonPrimitive(json.encodeToString(JsonElement.serializer(), output)))
+                            put("output", JsonPrimitive(outputStr))
                         },
                     )
                 }
@@ -566,7 +569,7 @@ object OpenAgenticSdk {
                         if (compactedToolIds.contains(e.toolUseId)) {
                             TOOL_OUTPUT_PLACEHOLDER
                         } else {
-                            json.encodeToString(JsonElement.serializer(), e.output ?: JsonNull)
+                            encodeToolOutputForModel(json = json, output = e.output ?: JsonNull)
                         }
                     items.add(
                         buildJsonObject {
@@ -581,6 +584,80 @@ object OpenAgenticSdk {
             }
         }
         return items
+    }
+
+    private fun encodeToolOutputForModel(
+        json: kotlinx.serialization.json.Json,
+        output: JsonElement,
+    ): String {
+        val bounded = truncateLongJsonStrings(el = output, maxCharsPerString = TOOL_OUTPUT_MAX_CHARS_PER_STRING)
+        val encoded =
+            try {
+                json.encodeToString(JsonElement.serializer(), bounded)
+            } catch (_: Throwable) {
+                "{}"
+            }
+        if (encoded.length <= TOOL_OUTPUT_MAX_CHARS_FOR_MODEL) return encoded
+
+        val preview = headTailTruncate(text = encoded, maxChars = 2_500)
+        val wrapper =
+            buildJsonObject {
+                put("_openagentic_truncated", JsonPrimitive(true))
+                put("reason", JsonPrimitive("tool_output_too_large"))
+                put("original_chars", JsonPrimitive(encoded.length))
+                put("preview", JsonPrimitive(preview))
+            }
+        return try {
+            json.encodeToString(JsonElement.serializer(), wrapper)
+        } catch (_: Throwable) {
+            """{"_openagentic_truncated":true}"""
+        }
+    }
+
+    private fun truncateLongJsonStrings(
+        el: JsonElement,
+        maxCharsPerString: Int,
+    ): JsonElement {
+        val limit = maxCharsPerString.coerceAtLeast(0)
+        return when (el) {
+            is JsonPrimitive -> {
+                if (!el.isString) return el
+                val s = el.content
+                if (limit <= 0) return JsonPrimitive("")
+                if (s.length <= limit) el else JsonPrimitive(headTailTruncate(text = s, maxChars = limit))
+            }
+            is JsonArray -> JsonArray(el.map { truncateLongJsonStrings(it, limit) })
+            is JsonObject -> buildJsonObject { for ((k, v) in el) put(k, truncateLongJsonStrings(v, limit)) }
+            else -> el
+        }
+    }
+
+    private fun headTailTruncate(
+        text: String,
+        maxChars: Int,
+    ): String {
+        val limit = maxChars.coerceAtLeast(0)
+        if (limit <= 0) return ""
+        if (text.length <= limit) return text
+
+        var removed = (text.length - limit).coerceAtLeast(0)
+        var marker = "\n…$removed chars truncated…\n"
+        var headLen = 0
+        var tailLen = 0
+        repeat(3) {
+            val remaining = (limit - marker.length).coerceAtLeast(0)
+            if (remaining <= 0) return marker.take(limit)
+            headLen = remaining / 2
+            tailLen = remaining - headLen
+            removed = (text.length - headLen - tailLen).coerceAtLeast(0)
+            val marker2 = "\n…$removed chars truncated…\n"
+            if (marker2.length == marker.length) {
+                marker = marker2
+                return@repeat
+            }
+            marker = marker2
+        }
+        return text.take(headLen) + marker + text.takeLast(tailLen)
     }
 
     private fun trimEventsForResume(
