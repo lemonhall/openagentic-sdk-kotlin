@@ -9,6 +9,7 @@ import me.lemonhall.openagentic.sdk.permissions.PermissionMode
 import me.lemonhall.openagentic.sdk.providers.Provider
 import me.lemonhall.openagentic.sdk.providers.ProviderProtocol
 import me.lemonhall.openagentic.sdk.sessions.FileSessionStore
+import me.lemonhall.openagentic.sdk.tools.TaskAgent
 import me.lemonhall.openagentic.sdk.tools.ToolRegistry
 import okio.FileSystem
 import okio.Path
@@ -29,13 +30,22 @@ data class OpenAgenticOptions(
     val permissionModeOverride: PermissionMode? = null,
     val hookEngine: HookEngine = HookEngine(),
     val taskRunner: TaskRunner? = null,
+    val taskAgents: List<TaskAgent> = emptyList(),
     val sessionStore: FileSessionStore,
     val resumeSessionId: String? = null,
     val resumeMaxEvents: Int = 1000,
     val resumeMaxBytes: Int = 2_000_000,
     val compaction: CompactionOptions = CompactionOptions(),
+    val toolOutputArtifacts: ToolOutputArtifactsOptions = ToolOutputArtifactsOptions(),
     val includePartialMessages: Boolean = false,
     val maxSteps: Int = 20,
+)
+
+data class ToolOutputArtifactsOptions(
+    val enabled: Boolean = true,
+    val dirName: String = "tool-output",
+    val maxBytes: Int = 50 * 1024,
+    val previewMaxChars: Int = 2500,
 )
 
 data class ProviderRetryOptions(

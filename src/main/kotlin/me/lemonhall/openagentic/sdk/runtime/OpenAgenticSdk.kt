@@ -53,6 +53,7 @@ import me.lemonhall.openagentic.sdk.sessions.EventJson
 import me.lemonhall.openagentic.sdk.tools.OpenAiToolSchemas
 import me.lemonhall.openagentic.sdk.tools.ToolContext
 import me.lemonhall.openagentic.sdk.tools.ToolOutput
+import me.lemonhall.openagentic.sdk.subagents.BuiltInSubAgents
 
 object OpenAgenticSdk {
     private const val SDK_VERSION: String = "0.0.0"
@@ -100,8 +101,20 @@ object OpenAgenticSdk {
 
             val toolSchemas =
                 when (protocol) {
-                    ProviderProtocol.RESPONSES -> OpenAiToolSchemas.forResponses(toolNamesEnabled, registry = options.tools, ctx = toolCtx)
-                    ProviderProtocol.LEGACY -> OpenAiToolSchemas.forOpenAi(toolNamesEnabled, registry = options.tools, ctx = toolCtx)
+                    ProviderProtocol.RESPONSES ->
+                        OpenAiToolSchemas.forResponses(
+                            toolNamesEnabled,
+                            registry = options.tools,
+                            ctx = toolCtx,
+                            taskAgents = options.taskAgents,
+                        )
+                    ProviderProtocol.LEGACY ->
+                        OpenAiToolSchemas.forOpenAi(
+                            toolNamesEnabled,
+                            registry = options.tools,
+                            ctx = toolCtx,
+                            taskAgents = options.taskAgents,
+                        )
                 }
 
             val hookContextBase =
@@ -976,11 +989,18 @@ object OpenAgenticSdk {
                         ),
                     )
                 } else {
+                    val output2 = maybeExternalizeToolOutput(
+                        sessionId = sessionId,
+                        toolUseId = toolCall.toolUseId,
+                        toolName = toolName,
+                        output = post.output,
+                        options = options,
+                    )
                     store.appendEvent(
                         sessionId,
                         ToolResult(
                             toolUseId = toolCall.toolUseId,
-                            output = post.output,
+                            output = output2,
                             isError = false,
                         ),
                     )
@@ -1044,7 +1064,14 @@ object OpenAgenticSdk {
         }
 
         return try {
-            val output = runner.run(agent = agent, prompt = prompt, context = TaskContext(sessionId = sessionId, toolUseId = toolCall.toolUseId))
+            val output0 = runner.run(agent = agent, prompt = prompt, context = TaskContext(sessionId = sessionId, toolUseId = toolCall.toolUseId))
+            val output = maybeExternalizeToolOutput(
+                sessionId = sessionId,
+                toolUseId = toolCall.toolUseId,
+                toolName = "Task/$agent",
+                output = output0,
+                options = options,
+            )
             val ok =
                 store.appendEvent(
                     sessionId,
@@ -1194,6 +1221,134 @@ object OpenAgenticSdk {
                 if (arr is JsonArray) parseOptionLabels(arr) else emptyList()
             }
             else -> emptyList()
+        }
+    }
+
+    private fun maybeExternalizeToolOutput(
+        sessionId: String,
+        toolUseId: String,
+        toolName: String,
+        output: JsonElement?,
+        options: OpenAgenticOptions,
+    ): JsonElement? {
+        val cfg = options.toolOutputArtifacts
+        if (!cfg.enabled) return output
+        if (output == null || output is JsonNull) return output
+
+        val json = EventJson.json
+        val encoded =
+            try {
+                json.encodeToString(JsonElement.serializer(), output)
+            } catch (_: Throwable) {
+                return output
+            }
+
+        val bytes = encoded.encodeToByteArray().size
+        if (bytes <= cfg.maxBytes) return output
+
+        val fs = options.fileSystem
+        val dir = options.sessionStore.rootDir.resolve(cfg.dirName)
+        try {
+            fs.createDirectories(dir)
+        } catch (_: Throwable) {
+            // If we cannot create the artifact directory, fall back to bounded wrapper without artifact_path.
+            return buildTruncatedWrapper(
+                sessionId = sessionId,
+                toolUseId = toolUseId,
+                toolName = toolName,
+                originalChars = encoded.length,
+                preview = headTailTruncate(text = encoded, maxChars = cfg.previewMaxChars),
+                artifactPath = null,
+                hint = buildTruncationHint(options, artifactPath = null),
+            )
+        }
+
+        val filename = buildToolOutputFilename(toolUseId = toolUseId, toolName = toolName)
+        val path = dir.resolve(filename)
+        try {
+            fs.write(path) { writeUtf8(encoded) }
+        } catch (_: Throwable) {
+            return buildTruncatedWrapper(
+                sessionId = sessionId,
+                toolUseId = toolUseId,
+                toolName = toolName,
+                originalChars = encoded.length,
+                preview = headTailTruncate(text = encoded, maxChars = cfg.previewMaxChars),
+                artifactPath = null,
+                hint = buildTruncationHint(options, artifactPath = null),
+            )
+        }
+
+        val artifactPath = path.toString()
+        return buildTruncatedWrapper(
+            sessionId = sessionId,
+            toolUseId = toolUseId,
+            toolName = toolName,
+            originalChars = encoded.length,
+            preview = headTailTruncate(text = encoded, maxChars = cfg.previewMaxChars),
+            artifactPath = artifactPath,
+            hint = buildTruncationHint(options, artifactPath = artifactPath),
+        )
+    }
+
+    private fun buildToolOutputFilename(
+        toolUseId: String,
+        toolName: String,
+    ): String {
+        fun safePiece(s: String): String {
+            val raw = s.trim().ifEmpty { "x" }
+            val out = StringBuilder(raw.length)
+            for (ch in raw) {
+                if (ch.isLetterOrDigit() || ch == '_' || ch == '-' || ch == '.') out.append(ch) else out.append('_')
+            }
+            return out.toString().take(120)
+        }
+        val id = safePiece(toolUseId)
+        val name = safePiece(toolName)
+        return "tool_${id}_${name}.json"
+    }
+
+    private fun buildTruncationHint(
+        options: OpenAgenticOptions,
+        artifactPath: String?,
+    ): String {
+        val saved = artifactPath?.trim().orEmpty().ifEmpty { "(unavailable)" }
+        val taskAllowed = options.taskRunner != null && (options.allowedTools?.contains("Task") ?: true)
+        val hasExplore = options.taskAgents.any { it.name == BuiltInSubAgents.EXPLORE_AGENT }
+        return if (taskAllowed && hasExplore) {
+            listOf(
+                "The tool call succeeded but the output was truncated.",
+                "Full output saved to: $saved",
+                "Next: Use Task(agent=\"explore\") to grep/read only relevant parts (offset/limit). Do NOT read the full file yourself.",
+            ).joinToString("\n")
+        } else {
+            listOf(
+                "The tool call succeeded but the output was truncated.",
+                "Full output saved to: $saved",
+                "Next: Use Grep to search and Read with offset/limit to view specific sections (avoid reading the full file).",
+            ).joinToString("\n")
+        }
+    }
+
+    private fun buildTruncatedWrapper(
+        sessionId: String,
+        toolUseId: String,
+        toolName: String,
+        originalChars: Int,
+        preview: String,
+        artifactPath: String?,
+        hint: String,
+    ): JsonElement {
+        return buildJsonObject {
+            put("_openagentic_truncated", JsonPrimitive(true))
+            put("reason", JsonPrimitive("tool_output_too_large"))
+            put("session_id", JsonPrimitive(sessionId))
+            put("tool_use_id", JsonPrimitive(toolUseId))
+            put("tool_name", JsonPrimitive(toolName))
+            put("original_chars", JsonPrimitive(originalChars))
+            put("preview", JsonPrimitive(preview))
+            if (!artifactPath.isNullOrBlank()) put("artifact_path", JsonPrimitive(artifactPath))
+            put("hint", JsonPrimitive(hint))
         }
     }
 

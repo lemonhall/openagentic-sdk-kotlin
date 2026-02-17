@@ -20,6 +20,7 @@ object OpenAiToolSchemas {
         toolNames: List<String>,
         registry: ToolRegistry? = null,
         ctx: ToolContext,
+        taskAgents: List<TaskAgent> = emptyList(),
     ): List<JsonObject> {
         val directory = ctx.cwd.toString().ifEmpty { "(unknown)" }
         val projectDir = (ctx.projectDir ?: ctx.cwd).toString()
@@ -30,6 +31,7 @@ object OpenAiToolSchemas {
                 "project_dir" to projectDir,
                 "maxBytes" to (1024 * 1024),
                 "maxLines" to 2000,
+                "agents" to renderTaskAgents(taskAgents),
             )
 
         val schemasByName = linkedMapOf<String, JsonObject>()
@@ -130,8 +132,9 @@ object OpenAiToolSchemas {
         toolNames: List<String>,
         registry: ToolRegistry? = null,
         ctx: ToolContext,
+        taskAgents: List<TaskAgent> = emptyList(),
     ): List<JsonObject> {
-        val schemas = forOpenAi(toolNames, registry = registry, ctx = ctx)
+        val schemas = forOpenAi(toolNames, registry = registry, ctx = ctx, taskAgents = taskAgents)
         val out = mutableListOf<JsonObject>()
         for (t in schemas) {
             val type = (t["type"] as? JsonPrimitive)?.contentOrNullSafe()
