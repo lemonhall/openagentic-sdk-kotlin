@@ -87,7 +87,7 @@ object OpenAgenticSdk {
                         .firstOrNull { !it.responseId.isNullOrBlank() }
                         ?.responseId
             } else {
-                sessionId = store.createSession()
+                sessionId = store.createSession(metadata = options.createSessionMetadata)
                 val init =
                     store.appendEvent(
                         sessionId,
@@ -441,6 +441,44 @@ object OpenAgenticSdk {
         val waitOverrideMs: Long? = null,
     )
 
+    private fun looksLikeTransientStreamFailure(msgLower: String): Boolean {
+        val deny =
+            listOf(
+                "unauthorized",
+                "forbidden",
+                "authentication",
+                "invalid api key",
+                "api key",
+                "permission",
+                "quota",
+                "insufficient",
+                "billing",
+                "payment",
+                "bad request",
+                "invalid request",
+                "validation",
+                "model not found",
+                "unsupported",
+            )
+        if (deny.any { msgLower.contains(it) }) return false
+
+        val allow =
+            listOf(
+                "stream ended unexpectedly",
+                "unexpected end of stream",
+                "stream ended without completed event",
+                "timed out",
+                "timeout",
+                "connection reset",
+                "connection aborted",
+                "broken pipe",
+                "reset by peer",
+                "eof",
+                "socket",
+            )
+        return allow.any { msgLower.contains(it) }
+    }
+
     private fun retryDecision(
         t: Throwable,
         options: OpenAgenticOptions,
@@ -467,9 +505,11 @@ object OpenAgenticSdk {
                 return if (retryable) ProviderRetryDecision() else null
             }
             is ProviderInvalidResponseException -> {
-                // Treat "stream ended unexpectedly" as transient by default.
                 val msg = (t.message ?: "").lowercase()
-                val looksTransient = msg.contains("stream")
+                val looksTransient =
+                    (t.cause is EOFException) ||
+                        (t.cause is SocketException) ||
+                        looksLikeTransientStreamFailure(msgLower = msg)
                 return if (looksTransient) ProviderRetryDecision() else null
             }
         }

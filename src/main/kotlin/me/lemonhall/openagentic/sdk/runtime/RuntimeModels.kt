@@ -41,6 +41,14 @@ data class OpenAgenticOptions(
     val taskRunner: TaskRunner? = null,
     val taskAgents: List<TaskAgent> = emptyList(),
     val sessionStore: FileSessionStore,
+    /**
+     * Metadata persisted into `sessions/<session_id>/meta.json` when creating a new session.
+     *
+     * Notes:
+     * - Only used when `resumeSessionId` is null/blank (new session).
+     * - Stored as string key/value pairs for product-level session identity.
+     */
+    val createSessionMetadata: Map<String, String> = emptyMap(),
     val resumeSessionId: String? = null,
     val resumeMaxEvents: Int = 1000,
     val resumeMaxBytes: Int = 2_000_000,
