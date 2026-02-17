@@ -1064,7 +1064,17 @@ object OpenAgenticSdk {
         }
 
         return try {
-            val output0 = runner.run(agent = agent, prompt = prompt, context = TaskContext(sessionId = sessionId, toolUseId = toolCall.toolUseId))
+            val output0 =
+                runner.run(
+                    agent = agent,
+                    prompt = prompt,
+                    context =
+                        TaskContext(
+                            sessionId = sessionId,
+                            toolUseId = toolCall.toolUseId,
+                            emitProgress = options.taskProgressEmitter,
+                        ),
+                )
             val output = maybeExternalizeToolOutput(
                 sessionId = sessionId,
                 toolUseId = toolCall.toolUseId,

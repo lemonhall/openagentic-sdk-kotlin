@@ -29,6 +29,15 @@ data class OpenAgenticOptions(
     val sessionPermissionMode: PermissionMode? = null,
     val permissionModeOverride: PermissionMode? = null,
     val hookEngine: HookEngine = HookEngine(),
+    /**
+     * A best-effort progress callback for Task(sub-agent) execution.
+     *
+     * Notes:
+     * - This callback is NOT persisted in session events.
+     * - It is intended for UI status lines / "anti-anxiety" progress indicators.
+     * - Runners should keep messages short and human-friendly.
+     */
+    val taskProgressEmitter: ((String) -> Unit)? = null,
     val taskRunner: TaskRunner? = null,
     val taskAgents: List<TaskAgent> = emptyList(),
     val sessionStore: FileSessionStore,
@@ -58,6 +67,7 @@ data class ProviderRetryOptions(
 data class TaskContext(
     val sessionId: String,
     val toolUseId: String,
+    val emitProgress: ((String) -> Unit)? = null,
 )
 
 fun interface TaskRunner {
