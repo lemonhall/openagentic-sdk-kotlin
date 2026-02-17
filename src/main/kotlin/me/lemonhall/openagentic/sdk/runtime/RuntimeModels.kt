@@ -58,9 +58,11 @@ data class ToolOutputArtifactsOptions(
 )
 
 data class ProviderRetryOptions(
-    val maxRetries: Int = 0,
-    val initialBackoffMs: Long = 200,
-    val maxBackoffMs: Long = 2_000,
+    // Align with Codex/OpenCode default experience: transient network failures should be retried.
+    // `maxRetries=6` means: after the first failed attempt, retry up to 6 more times (<= 7 total attempts).
+    val maxRetries: Int = 6,
+    val initialBackoffMs: Long = 500,
+    val maxBackoffMs: Long = 30_000,
     val useRetryAfterMs: Boolean = true,
 )
 

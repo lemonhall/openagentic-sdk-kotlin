@@ -1,6 +1,7 @@
 package me.lemonhall.openagentic.sdk.providers
 
 import java.net.URI
+import java.io.EOFException
 import java.io.InputStreamReader
 import java.time.ZoneOffset
 import java.time.ZonedDateTime
@@ -147,6 +148,19 @@ class OpenAIResponsesHttpProvider(
                     }
                 } catch (t: java.net.SocketTimeoutException) {
                     throw ProviderTimeoutException("OpenAIResponsesHttpProvider: stream timeout", t)
+                } catch (t: EOFException) {
+                    // Treat abrupt stream termination as transient to align with Codex/OpenCode retry semantics.
+                    throw ProviderTimeoutException("OpenAIResponsesHttpProvider: stream EOF", t)
+                } catch (t: java.net.SocketException) {
+                    // e.g. "Connection reset" or other transport-level drops.
+                    throw ProviderTimeoutException("OpenAIResponsesHttpProvider: stream socket error", t)
+                } catch (t: java.io.IOException) {
+                    val msg = (t.message ?: "").lowercase()
+                    val looksLikeDisconnect = msg.contains("reset") || msg.contains("broken pipe") || msg.contains("eof")
+                    if (looksLikeDisconnect) {
+                        throw ProviderTimeoutException("OpenAIResponsesHttpProvider: stream io disconnect", t)
+                    }
+                    throw t
                 }
                 for (sev in decoder.finish()) emit(sev)
             } finally {

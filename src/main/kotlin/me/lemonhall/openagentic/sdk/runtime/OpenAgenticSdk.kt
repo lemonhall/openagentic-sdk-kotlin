@@ -1,5 +1,7 @@
 package me.lemonhall.openagentic.sdk.runtime
 
+import java.io.EOFException
+import java.net.SocketException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.flow
@@ -43,8 +45,11 @@ import me.lemonhall.openagentic.sdk.providers.LegacyProvider
 import me.lemonhall.openagentic.sdk.providers.LegacyRequest
 import me.lemonhall.openagentic.sdk.providers.ModelOutput
 import me.lemonhall.openagentic.sdk.providers.ProviderException
+import me.lemonhall.openagentic.sdk.providers.ProviderHttpException
+import me.lemonhall.openagentic.sdk.providers.ProviderInvalidResponseException
 import me.lemonhall.openagentic.sdk.providers.ProviderProtocol
 import me.lemonhall.openagentic.sdk.providers.ProviderRateLimitException
+import me.lemonhall.openagentic.sdk.providers.ProviderTimeoutException
 import me.lemonhall.openagentic.sdk.providers.ResponsesProvider
 import me.lemonhall.openagentic.sdk.providers.ResponsesRequest
 import me.lemonhall.openagentic.sdk.providers.StreamingResponsesProvider
@@ -232,10 +237,14 @@ object OpenAgenticSdk {
                                                     }
 
                                                     is ProviderStreamEvent.Completed -> completed = sev.output
-                                                    is ProviderStreamEvent.Failed -> throw RuntimeException("provider stream failed: ${sev.message}")
+                                                    is ProviderStreamEvent.Failed ->
+                                                        throw ProviderInvalidResponseException(
+                                                            message = "provider stream failed: ${sev.message}",
+                                                            raw = sev.raw?.toString(),
+                                                        )
                                                 }
                                             }
-                                            completed ?: throw RuntimeException("provider stream ended without Completed event")
+                                            completed ?: throw ProviderInvalidResponseException("provider stream ended without Completed event")
                                         }
                                     }
                                     return callWithRateLimitRetry(options) { provider.complete(req) }
@@ -415,17 +424,65 @@ object OpenAgenticSdk {
                 return block()
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t
-                val rl = t as? ProviderRateLimitException ?: throw t
+
+                // Align with OpenCode: retry transient provider/network failures with exponential backoff.
+                val decision = retryDecision(t, options) ?: throw t
                 if (attempt >= max) throw t
-                val waitMs: Long =
-                    (if (retry.useRetryAfterMs) rl.retryAfterMs?.coerceAtLeast(0) else null)
-                        ?: backoff
+                val waitMs: Long = decision.waitOverrideMs ?: backoff
                 val cappedWaitMs = minOf(waitMs, maxBackoff)
                 if (cappedWaitMs > 0) delay(cappedWaitMs)
                 backoff = minOf(backoff * 2, maxBackoff)
                 attempt += 1
             }
         }
+    }
+
+    private data class ProviderRetryDecision(
+        val waitOverrideMs: Long? = null,
+    )
+
+    private fun retryDecision(
+        t: Throwable,
+        options: OpenAgenticOptions,
+    ): ProviderRetryDecision? {
+        val retry = options.providerRetry
+        if (retry.maxRetries <= 0) return null
+
+        when (t) {
+            is ProviderRateLimitException -> {
+                val wait = if (retry.useRetryAfterMs) t.retryAfterMs?.coerceAtLeast(0) else null
+                return ProviderRetryDecision(waitOverrideMs = wait)
+            }
+            is ProviderTimeoutException -> return ProviderRetryDecision()
+            is ProviderHttpException -> {
+                val status = t.status
+                val retryable =
+                    status == 408 ||
+                        status == 425 ||
+                        status == 429 ||
+                        status == 500 ||
+                        status == 502 ||
+                        status == 503 ||
+                        status == 504
+                return if (retryable) ProviderRetryDecision() else null
+            }
+            is ProviderInvalidResponseException -> {
+                // Treat "stream ended unexpectedly" as transient by default.
+                val msg = (t.message ?: "").lowercase()
+                val looksTransient = msg.contains("stream")
+                return if (looksTransient) ProviderRetryDecision() else null
+            }
+        }
+
+        // Some stacks surface stream disconnects as raw exceptions.
+        if (t is EOFException) return ProviderRetryDecision()
+        if (t is SocketException) return ProviderRetryDecision()
+
+        val msg = (t.message ?: "").lowercase()
+        if (msg.contains("eof")) return ProviderRetryDecision()
+        if (msg.contains("connection reset")) return ProviderRetryDecision()
+
+        return null
     }
 
     private fun effectivePermissionGate(options: OpenAgenticOptions): PermissionGate {
