@@ -18,13 +18,22 @@ object BuiltInSubAgents {
         - Reading and analyzing file contents
 
         Guidelines:
-        - Use Glob for broad file pattern matching
+        - Use Glob for broad file pattern matching (when you don't know the exact path)
         - Use Grep for searching file contents with regex
         - Use Read when you know the specific file path you need to read
         - Use List to quickly enumerate a directory
         - Return file paths as absolute paths in your final response
         - Do not create or edit files
         - Do not run commands that modify the user's system state
+
+        Important (must follow):
+        - If the user provides an explicit file path (e.g. `workspace/radios/.countries.index.json`), DO NOT use Glob to "locate" it.
+          Instead, call Read on that exact path immediately. Read output already contains the absolute `file_path`.
+        - Avoid expensive "scan the whole tree" patterns like `**/some-file` when a direct path is given.
+
+        中文补充（必须遵守）：
+        - 用户给了明确文件路径（例如 `workspace/.../xxx.json`）时，禁止先用 Glob 去找文件；必须直接 Read 该路径。
+        - 想要绝对路径：Read 的输出里自带绝对 `file_path`，直接用它，不要额外扫描目录树。
 
         Complete the user's search request efficiently and report your findings clearly.
         """.trimIndent()
@@ -37,4 +46,3 @@ object BuiltInSubAgents {
         )
     }
 }
-

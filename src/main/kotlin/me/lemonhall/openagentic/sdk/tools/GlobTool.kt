@@ -14,6 +14,7 @@ class GlobTool : Tool {
     override val description: String = "Find files by glob pattern."
 
     private val maxMatches: Int = 5000
+    private val maxScannedPaths: Int = 250_000
 
     override suspend fun run(
         input: ToolInput,
@@ -30,7 +31,12 @@ class GlobTool : Tool {
         val baseNorm = base.normalized()
 
         val rx = globToRegex(pattern)
-        val scanRoots = resolveScanRoots(baseNorm, pattern, ctx)
+        val earlyExit = shouldEarlyExitAfterFirstMatch(pattern)
+        val workspaceFirst =
+            earlyExit &&
+                rootRaw.isEmpty() &&
+                (ctx.fileSystem.metadataOrNull(baseNorm.resolve("workspace"))?.isDirectory == true)
+        val scanRoots = if (workspaceFirst) listOf(baseNorm.resolve("workspace")) else resolveScanRoots(baseNorm, pattern, ctx)
 
         val matches = mutableListOf<String>()
         var scanned = 0
@@ -41,9 +47,40 @@ class GlobTool : Tool {
                     currentCoroutineContext().ensureActive()
                     yield()
                 }
+                if (scanned >= maxScannedPaths) {
+                    matches.sort()
+                    val out =
+                        buildJsonObject {
+                            put("root", JsonPrimitive(baseNorm.toString()))
+                            put("matches", JsonArray(matches.map { JsonPrimitive(it) }))
+                            put("search_path", JsonPrimitive(baseNorm.toString()))
+                            put("pattern", JsonPrimitive(pattern))
+                            put("count", JsonPrimitive(matches.size))
+                            put("truncated", JsonPrimitive(true))
+                            put("stopped_early", JsonPrimitive(true))
+                            put("early_exit_reason", JsonPrimitive("max_scanned_paths"))
+                        }
+                    return ToolOutput.Json(out)
+                }
 
                 val rel = p.relativeTo(baseNorm).toString().replace('\\', '/')
                 if (rx.matches(rel)) matches.add(p.toString())
+
+                if (earlyExit && matches.isNotEmpty()) {
+                    matches.sort()
+                    val out =
+                        buildJsonObject {
+                            put("root", JsonPrimitive(baseNorm.toString()))
+                            put("matches", JsonArray(matches.map { JsonPrimitive(it) }))
+                            put("search_path", JsonPrimitive(scanRoot.toString()))
+                            put("pattern", JsonPrimitive(pattern))
+                            put("count", JsonPrimitive(matches.size))
+                            put("truncated", JsonPrimitive(true))
+                            put("stopped_early", JsonPrimitive(true))
+                            put("early_exit_reason", JsonPrimitive(if (workspaceFirst) "first_match_workspace" else "first_match"))
+                        }
+                    return ToolOutput.Json(out)
+                }
 
                 if (matches.size >= maxMatches) {
                     matches.sort()
@@ -55,6 +92,65 @@ class GlobTool : Tool {
                             put("pattern", JsonPrimitive(pattern))
                             put("count", JsonPrimitive(matches.size))
                             put("truncated", JsonPrimitive(true))
+                        }
+                    return ToolOutput.Json(out)
+                }
+            }
+        }
+
+        if (workspaceFirst && matches.isEmpty()) {
+            // Fallback: user may still expect a match outside workspace.
+            for (p in ctx.fileSystem.listRecursively(baseNorm)) {
+                scanned++
+                if (scanned % 2048 == 0) {
+                    currentCoroutineContext().ensureActive()
+                    yield()
+                }
+                if (scanned >= maxScannedPaths) {
+                    matches.sort()
+                    val out =
+                        buildJsonObject {
+                            put("root", JsonPrimitive(baseNorm.toString()))
+                            put("matches", JsonArray(matches.map { JsonPrimitive(it) }))
+                            put("search_path", JsonPrimitive(baseNorm.toString()))
+                            put("pattern", JsonPrimitive(pattern))
+                            put("count", JsonPrimitive(matches.size))
+                            put("truncated", JsonPrimitive(true))
+                            put("stopped_early", JsonPrimitive(true))
+                            put("early_exit_reason", JsonPrimitive("max_scanned_paths_fallback"))
+                        }
+                    return ToolOutput.Json(out)
+                }
+
+                val rel = p.relativeTo(baseNorm).toString().replace('\\', '/')
+                if (rx.matches(rel)) matches.add(p.toString())
+                if (earlyExit && matches.isNotEmpty()) {
+                    matches.sort()
+                    val out =
+                        buildJsonObject {
+                            put("root", JsonPrimitive(baseNorm.toString()))
+                            put("matches", JsonArray(matches.map { JsonPrimitive(it) }))
+                            put("search_path", JsonPrimitive(baseNorm.toString()))
+                            put("pattern", JsonPrimitive(pattern))
+                            put("count", JsonPrimitive(matches.size))
+                            put("truncated", JsonPrimitive(true))
+                            put("stopped_early", JsonPrimitive(true))
+                            put("early_exit_reason", JsonPrimitive("first_match_fallback"))
+                        }
+                    return ToolOutput.Json(out)
+                }
+                if (matches.size >= maxMatches) {
+                    matches.sort()
+                    val out =
+                        buildJsonObject {
+                            put("root", JsonPrimitive(baseNorm.toString()))
+                            put("matches", JsonArray(matches.map { JsonPrimitive(it) }))
+                            put("search_path", JsonPrimitive(baseNorm.toString()))
+                            put("pattern", JsonPrimitive(pattern))
+                            put("count", JsonPrimitive(matches.size))
+                            put("truncated", JsonPrimitive(true))
+                            put("stopped_early", JsonPrimitive(true))
+                            put("early_exit_reason", JsonPrimitive("max_matches_fallback"))
                         }
                     return ToolOutput.Json(out)
                 }
@@ -73,6 +169,19 @@ class GlobTool : Tool {
             }
         return ToolOutput.Json(out)
     }
+}
+
+private fun shouldEarlyExitAfterFirstMatch(patternRaw: String): Boolean {
+    val pattern = patternRaw.trim().replace('\\', '/').trimStart('/')
+    if (pattern.isEmpty()) return false
+    val components = pattern.split('/').filter { it.isNotEmpty() }
+    if (components.size != 2) return false
+    if (components[0] != "**") return false
+    val name = components[1]
+    if (name.isEmpty() || name == "**") return false
+    if (name.contains('*') || name.contains('?') || name.contains('[')) return false
+    if (name.contains('/')) return false
+    return true
 }
 
 private fun resolveScanRoots(
