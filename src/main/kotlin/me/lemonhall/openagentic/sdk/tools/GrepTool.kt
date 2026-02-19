@@ -1,5 +1,8 @@
 package me.lemonhall.openagentic.sdk.tools
 
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.yield
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -8,12 +11,14 @@ import kotlinx.serialization.json.buildJsonObject
 import me.lemonhall.openagentic.sdk.json.asBooleanOrNull
 import me.lemonhall.openagentic.sdk.json.asIntOrNull
 import me.lemonhall.openagentic.sdk.json.asStringOrNull
+import okio.Path
 
 class GrepTool : Tool {
     override val name: String = "Grep"
     override val description: String = "Search file contents with a regex."
 
     private val maxMatches: Int = 5000
+    private val maxFileBytes: Long = 2L * 1024L * 1024L
 
     override suspend fun run(
         input: ToolInput,
@@ -53,10 +58,35 @@ class GrepTool : Tool {
         val filesWithMatches = linkedSetOf<String>()
         val includeHidden = input["include_hidden"]?.asBooleanOrNull() != false
 
-        for (p in ctx.fileSystem.listRecursively(rootNorm)) {
-            if (ctx.fileSystem.metadataOrNull(p)?.isRegularFile != true) continue
-            val rel = p.relativeTo(rootNorm).toString()
-            if (!fileGlobRx.matches(rel)) continue
+        val explicitFile = resolveExplicitFileOrNull(fileGlob, ctx)
+        val scanRoots =
+            when {
+                explicitFile != null -> listOf(explicitFile)
+                else -> resolveScanRoots(rootNorm, fileGlob, ctx)
+            }
+
+        var scanned = 0
+        for (scanRoot in scanRoots) {
+            val candidates =
+                if (explicitFile != null) {
+                    sequenceOf(scanRoot)
+                } else {
+                    ctx.fileSystem.listRecursively(scanRoot)
+                }
+
+            for (p in candidates) {
+                scanned++
+                if (scanned % 2048 == 0) {
+                    currentCoroutineContext().ensureActive()
+                    yield()
+                }
+
+                val md = ctx.fileSystem.metadataOrNull(p) ?: continue
+                if (!md.isRegularFile) continue
+                if (md.size != null && md.size!! > maxFileBytes) continue
+
+                val rel = p.relativeTo(rootNorm).toString().replace('\\', '/')
+                if (!fileGlobRx.matches(rel)) continue
             if (!includeHidden) {
                 val segs = p.relativeTo(rootNorm).segments
                 if (segs.any { it.startsWith(".") }) continue
@@ -118,6 +148,7 @@ class GrepTool : Tool {
                 }
             }
         }
+        }
 
         if (mode == "files_with_matches") {
             val files = filesWithMatches.toList().sorted()
@@ -141,4 +172,59 @@ class GrepTool : Tool {
             }
         return ToolOutput.Json(out)
     }
+}
+
+private fun resolveExplicitFileOrNull(
+    fileGlobRaw: String,
+    ctx: ToolContext,
+): Path? {
+    val fileGlob = fileGlobRaw.trim()
+    if (fileGlob.isEmpty()) return null
+    if (fileGlob == "**/*") return null
+    if (fileGlob.any { it == '*' || it == '?' || it == '[' }) return null
+
+    val p =
+        try {
+            resolveToolPath(fileGlob, ctx).normalized()
+        } catch (_: Throwable) {
+            return null
+        }
+    return if (ctx.fileSystem.metadataOrNull(p)?.isRegularFile == true) p else null
+}
+
+private fun resolveScanRoots(
+    rootNorm: Path,
+    fileGlobRaw: String,
+    ctx: ToolContext,
+): List<Path> {
+    val fileGlob = fileGlobRaw.trim().replace('\\', '/').trimStart('/')
+    if (fileGlob.isEmpty() || fileGlob == "**/*") return listOf(rootNorm)
+
+    val components = fileGlob.split('/').filter { it.isNotEmpty() }
+    val fixedPrefix =
+        components.takeWhile { seg ->
+            seg != "**" && !seg.contains('*') && !seg.contains('?') && !seg.contains('[')
+        }
+    if (fixedPrefix.isEmpty()) return listOf(rootNorm)
+
+    val prefixDir = fixedPrefix.joinToString("/")
+    val prefixPath = rootNorm.resolve(prefixDir).normalized()
+    if (ctx.fileSystem.metadataOrNull(prefixPath)?.isDirectory != true) return listOf(rootNorm)
+
+    val rest = components.drop(fixedPrefix.size)
+    if (rest.isNotEmpty()) {
+        val first = rest[0]
+        val isDirGlob = first != "**" && (first.contains('*') || first.contains('?') || first.contains('['))
+        if (isDirGlob) {
+            val dirRx = globToRegex(first)
+            val expanded =
+                ctx.fileSystem
+                    .list(prefixPath)
+                    .filter { p -> ctx.fileSystem.metadataOrNull(p)?.isDirectory == true && dirRx.matches(p.name) }
+                    .toList()
+            if (expanded.isNotEmpty()) return expanded
+        }
+    }
+
+    return listOf(prefixPath)
 }

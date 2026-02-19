@@ -150,4 +150,33 @@ class GrepToolTest {
             assertEquals("false", obj["truncated"]?.jsonPrimitive?.content)
             assertEquals(0, obj["total_matches"]?.jsonPrimitive?.content?.toInt())
         }
+
+    @Test
+    fun grepAcceptsFileGlobAsExplicitFilePath() =
+        runTest {
+            val rootNio = Files.createTempDirectory("openagentic-test-")
+            val root = rootNio.toString().replace('\\', '/').toPath()
+            FileSystem.SYSTEM.createDirectories(root.resolve("workspace").resolve("radios"))
+            FileSystem.SYSTEM.write(root.resolve("workspace").resolve("radios").resolve(".countries.index.json")) {
+                writeUtf8("{\"countries\":[{\"code\":\"CN\",\"name\":\"China\"}]}\n")
+            }
+
+            val tool = GrepTool()
+            val ctx = ToolContext(fileSystem = FileSystem.SYSTEM, cwd = root, projectDir = root)
+            val out =
+                tool.run(
+                    buildJsonObject {
+                        put("query", JsonPrimitive("\"code\":\"CN\""))
+                        put("file_glob", JsonPrimitive("workspace/radios/.countries.index.json"))
+                    },
+                    ctx,
+                ) as ToolOutput.Json
+
+            val obj = out.value?.jsonObject
+            assertNotNull(obj)
+            val matches = obj["matches"]?.jsonArray ?: error("missing matches")
+            assertEquals(1, matches.size)
+            val fp = matches[0].jsonObject["file_path"]!!.jsonPrimitive.content
+            assertTrue(fp.endsWith("/workspace/radios/.countries.index.json"))
+        }
 }
