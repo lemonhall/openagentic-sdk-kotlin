@@ -36,7 +36,7 @@ object TaskRunners {
 
     fun builtInExplore(
         baseOptions: OpenAgenticOptions,
-        maxSteps: Int = 40,
+        maxSteps: Int = 25,
     ): TaskRunner {
         val marker = "OPENAGENTIC_SDK_EXPLORE_PROMPT_V1"
         val systemPrompt = BuiltInSubAgents.exploreSystemPrompt

@@ -34,6 +34,8 @@ object BuiltInSubAgents {
         中文补充（必须遵守）：
         - 用户给了明确文件路径（例如 `workspace/.../xxx.json`）时，禁止先用 Glob 去找文件；必须直接 Read 该路径。
         - 想要绝对路径：Read 的输出里自带绝对 `file_path`，直接用它，不要额外扫描目录树。
+        - Grep 对同一文件返回结果后，优先从已有结果中提取所需信息，不要对同一文件反复用不同关键词 Grep 来"确认"已经拿到的数据。
+        - 当 Read 或 Grep 已经提供了足够的信息来回答用户问题时，立即整理结果并返回，不要继续探索。
 
         Complete the user's search request efficiently and report your findings clearly.
         """.trimIndent()
