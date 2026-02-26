@@ -9,12 +9,14 @@ import kotlinx.serialization.json.jsonPrimitive
 import me.lemonhall.openagentic.sdk.runtime.ProviderStreamEvent
 
 internal data class SseEvent(
+    val event: String = "",
     val data: String,
 )
 
 internal class SseEventParser {
     private val buffer = StringBuilder()
     private val dataLines = mutableListOf<String>()
+    private var currentEvent = ""
 
     fun feed(chunk: CharSequence): List<SseEvent> {
         buffer.append(chunk)
@@ -39,8 +41,9 @@ internal class SseEventParser {
             processLine(line, out)
         }
         if (dataLines.isNotEmpty()) {
-            out.add(SseEvent(dataLines.joinToString("\n")))
+            out.add(SseEvent(event = currentEvent, data = dataLines.joinToString("\n")))
             dataLines.clear()
+            currentEvent = ""
         }
         return out
     }
@@ -51,9 +54,10 @@ internal class SseEventParser {
     ) {
         if (line.isEmpty()) {
             if (dataLines.isNotEmpty()) {
-                out.add(SseEvent(dataLines.joinToString("\n")))
+                out.add(SseEvent(event = currentEvent, data = dataLines.joinToString("\n")))
                 dataLines.clear()
             }
+            currentEvent = ""
             return
         }
         if (line.startsWith(":")) return
@@ -63,7 +67,10 @@ internal class SseEventParser {
         var value = if (sep >= 0) line.substring(sep + 1) else ""
         if (value.startsWith(" ")) value = value.drop(1)
 
-        if (field == "data") dataLines.add(value)
+        when (field) {
+            "data" -> dataLines.add(value)
+            "event" -> currentEvent = value
+        }
     }
 }
 
