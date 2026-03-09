@@ -62,7 +62,7 @@ internal fun responsesInputToAnthropicMessages(
         when {
             role == "system" -> {
                 flushPending()
-                val content = (item["content"] as? JsonPrimitive)?.contentOrNull.orEmpty()
+                val content = responsesContentToPlainText(item["content"])
                 if (content.isNotBlank()) systemParts.add(content)
             }
 
@@ -92,7 +92,7 @@ internal fun responsesInputToAnthropicMessages(
             }
 
             role == "user" || role == "assistant" -> {
-                val content = (item["content"] as? JsonPrimitive)?.contentOrNull.orEmpty()
+                val content = responsesContentToPlainText(item["content"])
                 val block = buildJsonObject {
                     put("type", JsonPrimitive("text"))
                     put("text", JsonPrimitive(content))

@@ -78,7 +78,7 @@ internal fun responsesInputToChatCompletionsMessages(
 
             role == "system" || role == "user" || role == "assistant" -> {
                 flushToolCalls()
-                val content = (item["content"] as? JsonPrimitive)?.contentOrNull.orEmpty()
+                val content = responsesContentToPlainText(item["content"])
                 messages.add(
                     buildJsonObject {
                         put("role", JsonPrimitive(role))

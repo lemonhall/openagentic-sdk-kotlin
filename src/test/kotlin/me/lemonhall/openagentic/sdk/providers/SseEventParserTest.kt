@@ -11,7 +11,7 @@ class SseEventParserTest {
         out.addAll(p.feed("data: a\n"))
         assertEquals(0, out.size)
         out.addAll(p.feed("\n"))
-        assertEquals(listOf(SseEvent("a")), out)
+        assertEquals(listOf(SseEvent(data = "a")), out)
     }
 
     @Test
@@ -20,7 +20,7 @@ class SseEventParserTest {
         val out = mutableListOf<SseEvent>()
         out.addAll(p.feed("data: a\n"))
         out.addAll(p.endOfInput())
-        assertEquals(listOf(SseEvent("a")), out)
+        assertEquals(listOf(SseEvent(data = "a")), out)
     }
 
     @Test
@@ -36,7 +36,7 @@ class SseEventParserTest {
                     "\n",
             ),
         )
-        assertEquals(listOf(SseEvent("x")), out)
+        assertEquals(listOf(SseEvent(event = "foo", data = "x")), out)
     }
 }
 
